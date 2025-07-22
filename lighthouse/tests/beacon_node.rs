@@ -2814,3 +2814,86 @@ fn invalid_block_roots_default_mainnet() {
             assert!(config.chain.invalid_block_roots.is_empty());
         })
 }
+
+// Fast Confirmation Rule CLI Integration Tests
+// These tests focus on CLI flag parsing and end-to-end configuration propagation,
+// not on the FCR algorithm itself (which is tested in fork_choice unit tests).
+
+#[test]
+fn fast_confirmation_cli_integration() {
+    // Test FCR enabled via CLI flag (only when feature is enabled)
+    #[cfg(feature = "fast_confirmation")]
+    {
+        CommandLineTest::new()
+            .flag("fast-confirmation", None)
+            .run_with_zero_port()
+            .with_config(|config| {
+                assert!(config.chain.fast_confirmation_enabled);
+                assert_eq!(
+                    config.chain.fcr_byzantine_threshold_basis_points,
+                    2500 // 25% default when not specified
+                );
+            });
+
+        // Test FCR enabled with custom threshold
+        CommandLineTest::new()
+            .flag("fast-confirmation", None)
+            .flag("fcr-byzantine-threshold", Some("30"))
+            .run_with_zero_port()
+            .with_config(|config| {
+                assert!(config.chain.fast_confirmation_enabled);
+                assert_eq!(
+                    config.chain.fcr_byzantine_threshold_basis_points,
+                    3000 // 30% = 3000 basis points
+                );
+            });
+    }
+}
+
+#[test]
+fn fast_confirmation_cli_validation() {
+    // Test CLI-level validation (not algorithm validation)
+    
+    #[cfg(feature = "fast_confirmation")]
+    {
+        // Test invalid Byzantine threshold (≥50%)
+        let result = CommandLineTest::new()
+            .flag("fast-confirmation", None)
+            .flag("fcr-byzantine-threshold", Some("50"))
+            .run_with_zero_port();
+        
+        assert!(result.is_err());
+        let error_msg = result.unwrap_err().to_string();
+        assert!(error_msg.contains("FCR Byzantine threshold must be less than 50%"));
+
+        // Test non-numeric threshold
+        let result = CommandLineTest::new()
+            .flag("fast-confirmation", None)
+            .flag("fcr-byzantine-threshold", Some("invalid"))
+            .run_with_zero_port();
+        
+        assert!(result.is_err());
+        let error_msg = result.unwrap_err().to_string();
+        assert!(error_msg.contains("invalid digit found in string"));
+    }
+}
+
+#[test]
+fn fast_confirmation_end_to_end_integration() {
+    // Test end-to-end integration with other CLI flags
+    
+    #[cfg(feature = "fast_confirmation")]
+    {
+        // Test FCR works with other flags
+        CommandLineTest::new()
+            .flag("fast-confirmation", None)
+            .flag("http", None)
+            .flag("metrics", None)
+            .run_with_zero_port()
+            .with_config(|config| {
+                assert!(config.chain.fast_confirmation_enabled);
+                assert!(config.http_api.enabled);
+                assert!(config.http_metrics.enabled);
+            });
+    }
+}

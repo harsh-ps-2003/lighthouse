@@ -21,6 +21,9 @@ use types::{
     IndexedAttestationRef, RelativeEpoch, SignedBeaconBlock, Slot,
 };
 
+#[cfg(feature = "fast_confirmation")]
+use crate::fast_confirmation::{FastConfirmation, FastConfirmationConfig};
+
 #[derive(Debug)]
 pub enum Error<T> {
     InvalidAttestation(InvalidAttestation),
@@ -309,7 +312,11 @@ pub struct ForkChoiceView {
 ///
 /// - Management of the justified state and caching of balances.
 /// - Queuing of attestations from the current slot.
-pub struct ForkChoice<T, E> {
+pub struct ForkChoice<T, E>
+where
+    T: ForkChoiceStore<E>,
+    E: EthSpec,
+{
     /// Storage for `ForkChoice`, modelled off the spec `Store` object.
     fc_store: T,
     /// The underlying representation of the block DAG.
@@ -318,6 +325,11 @@ pub struct ForkChoice<T, E> {
     queued_attestations: Vec<QueuedAttestation>,
     /// Stores a cache of the values required to be sent to the execution layer.
     forkchoice_update_parameters: ForkchoiceUpdateParameters,
+    
+    /// Fast Confirmation Rule
+    #[cfg(feature = "fast_confirmation")]
+    fast_confirmation: FastConfirmation<E>,
+    
     _phantom: PhantomData<E>,
 }
 
@@ -406,6 +418,8 @@ where
                 // This will be updated during the next call to `Self::get_head`.
                 head_root: Hash256::zero(),
             },
+            #[cfg(feature = "fast_confirmation")]
+            fast_confirmation: FastConfirmation::<E>::new(FastConfirmationConfig::new(2500)?),
             _phantom: PhantomData,
         };
 
@@ -512,6 +526,9 @@ where
             justified_hash,
             finalized_hash,
         };
+
+        // Update FCR state after finding the head
+        self.update_fcr_after_find_head(head_root)?;
 
         Ok(head_root)
     }
@@ -1434,6 +1451,8 @@ where
                 // Will be updated in the following call to `Self::get_head`.
                 head_root: Hash256::zero(),
             },
+            #[cfg(feature = "fast_confirmation")]
+            fast_confirmation: FastConfirmation::<E>::new(FastConfirmationConfig::new(2500)?),
             _phantom: PhantomData,
         };
 
@@ -1472,6 +1491,44 @@ where
     /// Update the global metrics `DEFAULT_REGISTRY` with info from the fork choice
     pub fn scrape_for_metrics(&self) {
         scrape_for_metrics(self);
+    }
+
+    // FCR Integration Methods :
+
+    /// Returns the fast confirmed head if FCR is enabled, otherwise None.
+    /// TODO: Implement actual FCR confirmation logic
+    pub fn get_fast_confirmed_head(&self) -> Option<Hash256> {
+        #[cfg(feature = "fast_confirmation")]
+        {
+            Some(self.fast_confirmation.get_latest_confirmed(
+                &self.proto_array,
+                &self.fc_store,
+                self.forkchoice_update_parameters.head_root,
+            ))
+        }
+        
+        #[cfg(not(feature = "fast_confirmation"))]
+        {
+            None
+        }
+    }
+
+    /// Updates FCR state after finding a new head.
+    /// TODO: Implement actual FCR state update logic
+    fn update_fcr_after_find_head(&mut self, head_root: Hash256) -> Result<(), Error<T::Error>> {
+        #[cfg(feature = "fast_confirmation")]
+        {
+            self.fast_confirmation.update_after_find_head(
+                head_root,
+                &self.proto_array,
+                &self.fc_store,
+            )
+        }
+
+        #[cfg(not(feature = "fast_confirmation"))]
+        {
+            Ok(())
+        }
     }
 }
 

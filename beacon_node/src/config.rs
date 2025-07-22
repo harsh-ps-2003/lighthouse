@@ -801,6 +801,27 @@ pub fn get_config<E: EthSpec>(
         client_config.chain.fork_choice_before_proposal_timeout_ms = timeout;
     }
 
+    // Fast Confirmation Rule configuration
+    #[cfg(feature = "fast_confirmation")]
+    {
+        client_config.chain.fast_confirmation_enabled = cli_args.get_flag("fast-confirmation");
+        
+        if let Some(threshold) = clap_utils::parse_optional::<u64>(cli_args, "fcr-byzantine-threshold")? {
+            // Validate that the threshold is within valid range (0-49%)
+            if threshold >= 50 {
+                return Err("FCR Byzantine threshold must be less than 50% to ensure confirmation is mathematically possible".to_string());
+            }
+            client_config.chain.fcr_byzantine_threshold_basis_points = threshold * 100; // Convert percentage to basis points
+        }
+    }
+
+    #[cfg(not(feature = "fast_confirmation"))]
+    {
+        // When FCR feature is disabled, always set to false and use default threshold
+        client_config.chain.fast_confirmation_enabled = false;
+        client_config.chain.fcr_byzantine_threshold_basis_points = 2500; // 25% default
+    }
+
     client_config.chain.always_reset_payload_statuses = cli_args.get_flag("reset-payload-statuses");
 
     client_config.chain.paranoid_block_proposal = cli_args.get_flag("paranoid-block-proposal");

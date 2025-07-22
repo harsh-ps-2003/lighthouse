@@ -19,3 +19,7 @@ types = { workspace = true }
 beacon_chain = { workspace = true }
 store = { workspace = true }
 tokio = { workspace = true }
+
+[features]
+default = []
+fast_confirmation = []
