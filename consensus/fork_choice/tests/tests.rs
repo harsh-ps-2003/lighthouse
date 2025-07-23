@@ -1302,52 +1302,57 @@ async fn progressive_balances_cache_proposer_slashing() {
 
 /// Tests FCR configuration parsing, defaults, and propagation
 /// TODO: This test will need updates when FCR implementation is complete
-#[cfg(feature = "fast_confirmation")]
 #[tokio::test]
 async fn fcr_configuration_tests() {
-    // Test with FCR enabled and custom threshold
-    let chain_config = ChainConfig {
-        fast_confirmation_enabled: true,
-        fcr_byzantine_threshold_basis_points: 3000, // 30%
-        ..ChainConfig::default()
-    };
-
-    let test = ForkChoiceTest::new_with_chain_config(chain_config);
-
-    // Verify the configuration was properly set by checking the chain's config
-    assert!(test.harness.chain.config.fast_confirmation_enabled);
-    assert_eq!(
-        test.harness
-            .chain
-            .config
-            .fcr_byzantine_threshold_basis_points,
-        3000
-    );
-
     // Test with FCR disabled (default)
-    let default_chain_config = ChainConfig::default();
-    let default_test = ForkChoiceTest::new_with_chain_config(default_chain_config);
+    #[cfg(not(feature = "fast_confirmation"))]
+    {
+        let default_chain_config = ChainConfig::default();
+        let default_test = ForkChoiceTest::new_with_chain_config(default_chain_config);
 
-    // Verify default values
-    assert!(!default_test.harness.chain.config.fast_confirmation_enabled);
-    assert_eq!(
-        default_test
+        // Verify default values
+        assert!(!default_test.harness.chain.config.fast_confirmation_enabled);
+        assert_eq!(
+            default_test
+                .harness
+                .chain
+                .config
+                .fcr_byzantine_threshold_basis_points,
+            2500
+        ); // 25% default
+    }
+
+    // Test with FCR enabled
+    #[cfg(feature = "fast_confirmation")]
+    {
+        let chain_config = ChainConfig {
+            fast_confirmation_enabled: true,
+            fcr_byzantine_threshold_basis_points: 3000, // 30%
+            ..ChainConfig::default()
+        };
+
+        let test = ForkChoiceTest::new_with_chain_config(chain_config);
+
+        // Verify the configuration was properly set by checking the chain's config
+        assert!(test.harness.chain.config.fast_confirmation_enabled);
+        assert_eq!(
+            test.harness
+                .chain
+                .config
+                .fcr_byzantine_threshold_basis_points,
+            3000
+        );
+
+        // Verify the configuration is accessible through the fork choice store
+        let _store = test
             .harness
             .chain
-            .config
-            .fcr_byzantine_threshold_basis_points,
-        2500
-    ); // 25% default
-
-    // Verify the configuration is accessible through the fork choice store
-    let _store = test
-        .harness
-        .chain
-        .canonical_head
-        .fork_choice_read_lock()
-        .fc_store();
-    // Note: The store doesn't directly expose FCR config, but the fact that
-    // we can access the store means the configuration was properly propagated
+            .canonical_head
+            .fork_choice_read_lock()
+            .fc_store();
+        // Note: The store doesn't directly expose FCR config, but the fact that
+        // we can access the store means the configuration was properly propagated
+    }
 }
 
 /// Tests FCR feature flag gating and disabled behavior
@@ -1355,46 +1360,74 @@ async fn fcr_configuration_tests() {
 #[tokio::test]
 async fn fcr_feature_flag_tests() {
     // Test with FCR disabled (default)
-    let test_disabled = ForkChoiceTest::new();
-
-    // Apply some blocks to get a head
-    let _test_disabled = test_disabled
-        .apply_blocks_while(|_, state| state.finalized_checkpoint().epoch == 0)
-        .await
-        .unwrap()
-        .apply_blocks(1)
-        .await;
-
-    // When FCR is disabled, `get_fast_confirmed_head` should return None
     #[cfg(not(feature = "fast_confirmation"))]
     {
-        assert!(_test_disabled
+        let test_disabled = ForkChoiceTest::new();
+
+        // Apply some blocks to get a head
+        let test_disabled = test_disabled
+            .apply_blocks_while(|_, state| state.finalized_checkpoint().epoch == 0)
+            .await
+            .unwrap()
+            .apply_blocks(1)
+            .await;
+
+        // When FCR is disabled, `get_fast_confirmed_head` should return None
+        assert!(test_disabled
             .harness
             .chain
             .canonical_head
             .fork_choice_read_lock()
             .get_fast_confirmed_head()
             .is_none());
+
+        // Test with FCR enabled in config but feature flag disabled
+        let chain_config = ChainConfig {
+            fast_confirmation_enabled: true,
+            fcr_byzantine_threshold_basis_points: 2500,
+            ..ChainConfig::default()
+        };
+
+        let test_feature_disabled = ForkChoiceTest::new_with_chain_config(chain_config);
+        let test_feature_disabled = test_feature_disabled
+            .apply_blocks_while(|_, state| state.finalized_checkpoint().epoch == 0)
+            .await
+            .unwrap()
+            .apply_blocks(1)
+            .await;
+
+        // When feature flag is disabled, FCR should return None regardless of config
+        let fast_confirmed_head = test_feature_disabled
+            .harness
+            .chain
+            .canonical_head
+            .fork_choice_read_lock()
+            .get_fast_confirmed_head();
+        assert!(fast_confirmed_head.is_none());
+
+        // Normal fork choice should still work
+        let head = test_feature_disabled.harness.head_block_root();
+        assert!(!head.is_zero());
     }
 
     // Test with FCR enabled
-    let chain_config = ChainConfig {
-        fast_confirmation_enabled: true,
-        fcr_byzantine_threshold_basis_points: 2500,
-        ..ChainConfig::default()
-    };
-
-    let test_enabled = ForkChoiceTest::new_with_chain_config(chain_config.clone());
-    let _test_enabled = test_enabled
-        .apply_blocks_while(|_, state| state.finalized_checkpoint().epoch == 0)
-        .await
-        .unwrap()
-        .apply_blocks(1)
-        .await;
-
-    // When FCR is enabled, get_fast_confirmed_head should return Some value
     #[cfg(feature = "fast_confirmation")]
     {
+        let chain_config = ChainConfig {
+            fast_confirmation_enabled: true,
+            fcr_byzantine_threshold_basis_points: 2500,
+            ..ChainConfig::default()
+        };
+
+        let test_enabled = ForkChoiceTest::new_with_chain_config(chain_config);
+        let test_enabled = test_enabled
+            .apply_blocks_while(|_, state| state.finalized_checkpoint().epoch == 0)
+            .await
+            .unwrap()
+            .apply_blocks(1)
+            .await;
+
+        // When FCR is enabled, get_fast_confirmed_head should return Some value
         let fast_confirmed_head = test_enabled
             .harness
             .chain
@@ -1406,20 +1439,131 @@ async fn fcr_feature_flag_tests() {
         // This will be updated when we implement the actual FCR logic
         assert_eq!(fast_confirmed_head.unwrap(), Hash256::zero());
     }
+}
 
-    // Test with FCR enabled in config but feature flag disabled
-    let test_feature_disabled = ForkChoiceTest::new_with_chain_config(chain_config);
-    let test_feature_disabled = test_feature_disabled
-        .apply_blocks_while(|_, state| state.finalized_checkpoint().epoch == 0)
-        .await
-        .unwrap()
-        .apply_blocks(1)
-        .await;
-
-    // When feature flag is disabled, FCR should return None regardless of config
+/// Tests FCR configuration validation and CLI validation
+/// TODO: This test will need updates when FCR implementation is complete
+#[test]
+fn fcr_validation_tests() {
+    // Test with FCR disabled
     #[cfg(not(feature = "fast_confirmation"))]
     {
-        let fast_confirmed_head = test_feature_disabled
+        // When feature is disabled, we can't test FCR-specific validation
+        // But we can test that the default config works
+        let default_chain_config = ChainConfig::default();
+        let _test = ForkChoiceTest::new_with_chain_config(default_chain_config);
+
+        // Verify default values are correct
+        assert!(!default_chain_config.fast_confirmation_enabled);
+        assert_eq!(
+            default_chain_config.fcr_byzantine_threshold_basis_points,
+            2500
+        );
+    }
+
+    // Test with FCR enabled
+    #[cfg(feature = "fast_confirmation")]
+    {
+        // Test valid configuration
+        let valid_config = FastConfirmationConfig::new(2500); // 25%
+        assert!(valid_config.is_ok());
+
+        // Test invalid configuration (≥50%)
+        let invalid_config = FastConfirmationConfig::new(5000); // 50%
+        assert!(invalid_config.is_err());
+        assert!(invalid_config.unwrap_err().contains("must be < 50%"));
+
+        // Test edge case (49.99%)
+        let edge_config = FastConfirmationConfig::new(4999); // 49.99%
+        assert!(edge_config.is_ok());
+
+        // Test zero threshold
+        let zero_config = FastConfirmationConfig::new(0); // 0%
+        assert!(zero_config.is_ok());
+
+        // Test valid threshold range (0-49%)
+        for threshold in [0, 1000, 2500, 4900] {
+            let chain_config = ChainConfig {
+                fast_confirmation_enabled: true,
+                fcr_byzantine_threshold_basis_points: threshold,
+                ..ChainConfig::default()
+            };
+
+            // Should not panic
+            let _test = ForkChoiceTest::new_with_chain_config(chain_config);
+        }
+    }
+}
+
+/// Tests that FCR metadata structures work correctly
+/// TODO: This test will need updates when FCR implementation is complete
+#[test]
+fn fcr_metadata_structures() {
+    // Test with FCR disabled
+    #[cfg(not(feature = "fast_confirmation"))]
+    {
+        // When feature is disabled, FCR metadata structures are not available
+        // But we can test that the default chain config works
+        let default_chain_config = ChainConfig::default();
+        assert!(!default_chain_config.fast_confirmation_enabled);
+        assert_eq!(
+            default_chain_config.fcr_byzantine_threshold_basis_points,
+            2500
+        );
+    }
+
+    // Test with FCR enabled
+    #[cfg(feature = "fast_confirmation")]
+    {
+        // Test FcrMeta default
+        let meta = FcrMeta::default();
+        assert_eq!(meta.support, 0);
+        assert_eq!(meta.committee_weight, 0);
+        assert!(!meta.confirmed);
+
+        // Test FcrMeta with values
+        let meta = FcrMeta {
+            support: 1000,
+            committee_weight: 2000,
+            confirmed: true,
+        };
+        assert_eq!(meta.support, 1000);
+        assert_eq!(meta.committee_weight, 2000);
+        assert!(meta.confirmed);
+
+        // Test FastConfirmationConfig beta_fraction calculation
+        let config = FastConfirmationConfig::new(2500).unwrap(); // 25%
+        assert_eq!(config.beta_fraction(), 0.25);
+
+        let config = FastConfirmationConfig::new(1000).unwrap(); // 10%
+        assert_eq!(config.beta_fraction(), 0.1);
+    }
+}
+
+/// Tests FCR integration hooks and Byzantine threshold variations
+/// TODO: This test will need updates when FCR implementation is complete
+#[tokio::test]
+async fn fcr_integration_and_threshold_tests() {
+    // Test with FCR disabled
+    #[cfg(not(feature = "fast_confirmation"))]
+    {
+        // When feature is disabled, FCR hooks should not interfere with normal operation
+        let test = ForkChoiceTest::new();
+
+        // Apply blocks and verify normal fork choice still works
+        let test = test
+            .apply_blocks_while(|_, state| state.finalized_checkpoint().epoch == 0)
+            .await
+            .unwrap()
+            .apply_blocks(1)
+            .await;
+
+        // Verify we can still get the head normally
+        let head = test.harness.head_block_root();
+        assert!(!head.is_zero());
+
+        // Verify FCR returns None when disabled
+        let fast_confirmed_head = test
             .harness
             .chain
             .canonical_head
@@ -1428,171 +1572,147 @@ async fn fcr_feature_flag_tests() {
         assert!(fast_confirmed_head.is_none());
     }
 
-    // Normal fork choice should still work
-    let head = test_feature_disabled.harness.head_block_root();
-    assert!(!head.is_zero());
-}
-
-/// Tests FCR configuration validation and CLI validation
-/// TODO: This test will need updates when FCR implementation is complete
-#[cfg(feature = "fast_confirmation")]
-#[test]
-fn fcr_validation_tests() {
-    // Test valid configuration
-    let valid_config = FastConfirmationConfig::new(2500); // 25%
-    assert!(valid_config.is_ok());
-
-    // Test invalid configuration (≥50%)
-    let invalid_config = FastConfirmationConfig::new(5000); // 50%
-    assert!(invalid_config.is_err());
-    assert!(invalid_config.unwrap_err().contains("must be < 50%"));
-
-    // Test edge case (49.99%)
-    let edge_config = FastConfirmationConfig::new(4999); // 49.99%
-    assert!(edge_config.is_ok());
-
-    // Test zero threshold
-    let zero_config = FastConfirmationConfig::new(0); // 0%
-    assert!(zero_config.is_ok());
-
-    // Test valid threshold range (0-49%)
-    for threshold in [0, 1000, 2500, 4900] {
+    // Test with FCR enabled
+    #[cfg(feature = "fast_confirmation")]
+    {
+        // Test with FCR enabled
         let chain_config = ChainConfig {
             fast_confirmation_enabled: true,
-            fcr_byzantine_threshold_basis_points: threshold,
+            fcr_byzantine_threshold_basis_points: 2500,
             ..ChainConfig::default()
         };
 
-        // Should not panic
-        let _test = ForkChoiceTest::new_with_chain_config(chain_config);
+        let test = ForkChoiceTest::new_with_chain_config(chain_config);
+
+        // Apply blocks and verify FCR hooks don't cause errors
+        let test = test
+            .apply_blocks_while(|_, state| state.finalized_checkpoint().epoch == 0)
+            .await
+            .unwrap()
+            .apply_blocks(1)
+            .await;
+
+        // The fact that we got here without errors means the FCR hooks are working
+        // The `update_fcr_after_find_head` method should have been called without panicking
+
+        // Verify we can still get the head normally
+        let head = test.harness.head_block_root();
+        assert!(!head.is_zero());
+
+        // Test with low threshold (10%)
+        let low_threshold_config = ChainConfig {
+            fast_confirmation_enabled: true,
+            fcr_byzantine_threshold_basis_points: 1000, // 10%
+            ..ChainConfig::default()
+        };
+
+        let test_low = ForkChoiceTest::new_with_chain_config(low_threshold_config);
+        let test_low = test_low
+            .apply_blocks_while(|_, state| state.finalized_checkpoint().epoch == 0)
+            .await
+            .unwrap()
+            .apply_blocks(1)
+            .await;
+
+        // Test with high threshold (40%)
+        let high_threshold_config = ChainConfig {
+            fast_confirmation_enabled: true,
+            fcr_byzantine_threshold_basis_points: 4000, // 40%
+            ..ChainConfig::default()
+        };
+
+        let test_high = ForkChoiceTest::new_with_chain_config(high_threshold_config);
+        let test_high = test_high
+            .apply_blocks_while(|_, state| state.finalized_checkpoint().epoch == 0)
+            .await
+            .unwrap()
+            .apply_blocks(1)
+            .await;
+
+        // Both should work without errors
+        assert!(!test_low.harness.head_block_root().is_zero());
+        assert!(!test_high.harness.head_block_root().is_zero());
     }
-}
-
-/// Tests that FCR metadata structures work correctly
-/// TODO: This test will need updates when FCR implementation is complete
-#[cfg(feature = "fast_confirmation")]
-#[test]
-fn fcr_metadata_structures() {
-    // Test FcrMeta default
-    let meta = FcrMeta::default();
-    assert_eq!(meta.support, 0);
-    assert_eq!(meta.committee_weight, 0);
-    assert!(!meta.confirmed);
-
-    // Test FcrMeta with values
-    let meta = FcrMeta {
-        support: 1000,
-        committee_weight: 2000,
-        confirmed: true,
-    };
-    assert_eq!(meta.support, 1000);
-    assert_eq!(meta.committee_weight, 2000);
-    assert!(meta.confirmed);
-
-    // Test FastConfirmationConfig beta_fraction calculation
-    let config = FastConfirmationConfig::new(2500).unwrap(); // 25%
-    assert_eq!(config.beta_fraction(), 0.25);
-
-    let config = FastConfirmationConfig::new(1000).unwrap(); // 10%
-    assert_eq!(config.beta_fraction(), 0.1);
-}
-
-/// Tests FCR integration hooks and Byzantine threshold variations
-/// TODO: This test will need updates when FCR implementation is complete
-#[cfg(feature = "fast_confirmation")]
-#[tokio::test]
-async fn fcr_integration_and_threshold_tests() {
-    // Test with FCR enabled
-    let chain_config = ChainConfig {
-        fast_confirmation_enabled: true,
-        fcr_byzantine_threshold_basis_points: 2500,
-        ..ChainConfig::default()
-    };
-
-    let test = ForkChoiceTest::new_with_chain_config(chain_config);
-
-    // Apply blocks and verify FCR hooks don't cause errors
-    let _test = test
-        .apply_blocks_while(|_, state| state.finalized_checkpoint().epoch == 0)
-        .await
-        .unwrap()
-        .apply_blocks(1)
-        .await;
-
-    // The fact that we got here without errors means the FCR hooks are working
-    // The update_fcr_after_find_head method should have been called without panicking
-
-    // Verify we can still get the head normally
-    let head = test.harness.head_block_root();
-    assert!(!head.is_zero());
-
-    // Test with low threshold (10%)
-    let low_threshold_config = ChainConfig {
-        fast_confirmation_enabled: true,
-        fcr_byzantine_threshold_basis_points: 1000, // 10%
-        ..ChainConfig::default()
-    };
-
-    let test_low = ForkChoiceTest::new_with_chain_config(low_threshold_config);
-    let test_low = test_low
-        .apply_blocks_while(|_, state| state.finalized_checkpoint().epoch == 0)
-        .await
-        .unwrap()
-        .apply_blocks(1)
-        .await;
-
-    // Test with high threshold (40%)
-    let high_threshold_config = ChainConfig {
-        fast_confirmation_enabled: true,
-        fcr_byzantine_threshold_basis_points: 4000, // 40%
-        ..ChainConfig::default()
-    };
-
-    let test_high = ForkChoiceTest::new_with_chain_config(high_threshold_config);
-    let test_high = test_high
-        .apply_blocks_while(|_, state| state.finalized_checkpoint().epoch == 0)
-        .await
-        .unwrap()
-        .apply_blocks(1)
-        .await;
-
-    // Both should work without errors
-    assert!(!test_low.harness.head_block_root().is_zero());
-    assert!(!test_high.harness.head_block_root().is_zero());
 }
 
 /// Tests FCR state persistence and attestation handling
 /// TODO: This test will need updates when FCR implementation is complete
 #[tokio::test]
 async fn fcr_state_and_attestation_tests() {
-    let chain_config = ChainConfig {
-        fast_confirmation_enabled: true,
-        fcr_byzantine_threshold_basis_points: 2500,
-        ..ChainConfig::default()
-    };
+    // Test with FCR disabled
+    #[cfg(not(feature = "fast_confirmation"))]
+    {
+        let test = ForkChoiceTest::new();
 
-    let test = ForkChoiceTest::new_with_chain_config(chain_config);
+        // Apply blocks and get initial state
+        let test = test
+            .apply_blocks_while(|_, state| state.finalized_checkpoint().epoch == 0)
+            .await
+            .unwrap()
+            .apply_blocks(1)
+            .await;
 
-    // Apply blocks and get initial state
-    let test = test
-        .apply_blocks_while(|_, state| state.finalized_checkpoint().epoch == 0)
-        .await
-        .unwrap()
-        .apply_blocks(1)
-        .await;
+        let initial_head = test.harness.head_block_root();
 
-    let initial_head = test.harness.head_block_root();
+        // Apply more blocks
+        let test = test.apply_blocks(1).await;
+        let new_head = test.harness.head_block_root();
 
-    // Apply more blocks
-    let _test = test.apply_blocks(1).await;
-    let new_head = _test.harness.head_block_root();
+        // Heads should be different (we applied a new block)
+        assert_ne!(initial_head, new_head);
 
-    // Heads should be different (we applied a new block)
-    assert_ne!(initial_head, new_head);
+        // FCR should return None when disabled
+        let fast_confirmed_head = test
+            .harness
+            .chain
+            .canonical_head
+            .fork_choice_read_lock()
+            .get_fast_confirmed_head();
+        assert!(fast_confirmed_head.is_none());
 
-    // FCR should still work after state changes
+        // Apply an attestation and verify normal operation still works
+        let test = test
+            .apply_attestation_to_chain(
+                MutationDelay::NoDelay,
+                |_, _| {}, // No mutation
+                |result| assert!(result.is_ok()),
+            )
+            .await;
+
+        // Normal fork choice should still work after attestation processing
+        let head = test.harness.head_block_root();
+        assert!(!head.is_zero());
+    }
+
+    // Test with FCR enabled
     #[cfg(feature = "fast_confirmation")]
     {
+        let chain_config = ChainConfig {
+            fast_confirmation_enabled: true,
+            fcr_byzantine_threshold_basis_points: 2500,
+            ..ChainConfig::default()
+        };
+
+        let test = ForkChoiceTest::new_with_chain_config(chain_config);
+
+        // Apply blocks and get initial state
+        let test = test
+            .apply_blocks_while(|_, state| state.finalized_checkpoint().epoch == 0)
+            .await
+            .unwrap()
+            .apply_blocks(1)
+            .await;
+
+        let initial_head = test.harness.head_block_root();
+
+        // Apply more blocks
+        let test = test.apply_blocks(1).await;
+        let new_head = test.harness.head_block_root();
+
+        // Heads should be different (we applied a new block)
+        assert_ne!(initial_head, new_head);
+
+        // FCR should still work after state changes
         let fast_confirmed_head = test
             .harness
             .chain
@@ -1600,20 +1720,17 @@ async fn fcr_state_and_attestation_tests() {
             .fork_choice_read_lock()
             .get_fast_confirmed_head();
         assert!(fast_confirmed_head.is_some());
-    }
 
-    // Apply an attestation and verify FCR still works
-    let test = test
-        .apply_attestation_to_chain(
-            MutationDelay::NoDelay,
-            |_, _| {}, // No mutation
-            |result| assert!(result.is_ok()),
-        )
-        .await;
+        // Apply an attestation and verify FCR still works
+        let test = test
+            .apply_attestation_to_chain(
+                MutationDelay::NoDelay,
+                |_, _| {}, // No mutation
+                |result| assert!(result.is_ok()),
+            )
+            .await;
 
-    // FCR should still work after attestation processing
-    #[cfg(feature = "fast_confirmation")]
-    {
+        // FCR should still work after attestation processing
         let fast_confirmed_head = test
             .harness
             .chain
@@ -1628,44 +1745,75 @@ async fn fcr_state_and_attestation_tests() {
 /// TODO: This test will need updates when FCR implementation is complete
 #[tokio::test]
 async fn fcr_skip_slots_and_validator_tests() {
-    let chain_config = ChainConfig {
-        fast_confirmation_enabled: true,
-        fcr_byzantine_threshold_basis_points: 2500,
-        ..ChainConfig::default()
-    };
+    // Test with FCR disabled
+    #[cfg(not(feature = "fast_confirmation"))]
+    {
+        let test = ForkChoiceTest::new();
 
-    let test = ForkChoiceTest::new_with_chain_config(chain_config);
+        // Apply some blocks
+        let test = test
+            .apply_blocks_while(|_, state| state.finalized_checkpoint().epoch == 0)
+            .await
+            .unwrap()
+            .apply_blocks(1)
+            .await;
 
-    // Apply some blocks
-    let test = test
-        .apply_blocks_while(|_, state| state.finalized_checkpoint().epoch == 0)
-        .await
-        .unwrap()
-        .apply_blocks(1)
-        .await;
+        // Skip some slots
+        let test = test.skip_slots(5);
 
-    // Skip some slots
-    let test = test.skip_slots(5);
+        // Apply more blocks
+        let test = test.apply_blocks(1).await;
 
-    // Apply more blocks
-    let _test = test.apply_blocks(1).await;
+        // FCR should return None when disabled
+        let fast_confirmed_head = test
+            .harness
+            .chain
+            .canonical_head
+            .fork_choice_read_lock()
+            .get_fast_confirmed_head();
+        assert!(fast_confirmed_head.is_none());
 
-    // FCR should still work after skip slots
+        // Normal fork choice should still work
+        let head = test.harness.head_block_root();
+        assert!(!head.is_zero());
+    }
+
+    // Test with FCR enabled
     #[cfg(feature = "fast_confirmation")]
     {
-        let fast_confirmed_head = _test
+        let chain_config = ChainConfig {
+            fast_confirmation_enabled: true,
+            fcr_byzantine_threshold_basis_points: 2500,
+            ..ChainConfig::default()
+        };
+
+        let test = ForkChoiceTest::new_with_chain_config(chain_config);
+
+        // Apply some blocks
+        let test = test
+            .apply_blocks_while(|_, state| state.finalized_checkpoint().epoch == 0)
+            .await
+            .unwrap()
+            .apply_blocks(1)
+            .await;
+
+        // Skip some slots
+        let test = test.skip_slots(5);
+
+        // Apply more blocks
+        let test = test.apply_blocks(1).await;
+
+        // FCR should still work after skip slots
+        let fast_confirmed_head = test
             .harness
             .chain
             .canonical_head
             .fork_choice_read_lock()
             .get_fast_confirmed_head();
         assert!(fast_confirmed_head.is_some());
-    }
 
-    // Test with default validator count (64) - FCR should work
-    #[cfg(feature = "fast_confirmation")]
-    {
-        let fast_confirmed_head = _test
+        // Test with default validator count (64) - FCR should work
+        let fast_confirmed_head = test
             .harness
             .chain
             .canonical_head
@@ -1679,47 +1827,93 @@ async fn fcr_skip_slots_and_validator_tests() {
 /// TODO: This test will need updates when FCR implementation is complete
 #[tokio::test]
 async fn fcr_fork_choice_compatibility() {
-    let chain_config = ChainConfig {
-        fast_confirmation_enabled: true,
-        fcr_byzantine_threshold_basis_points: 2500,
-        ..ChainConfig::default()
-    };
+    // Test with FCR disabled
+    #[cfg(not(feature = "fast_confirmation"))]
+    {
+        let test = ForkChoiceTest::new();
 
-    let test = ForkChoiceTest::new_with_chain_config(chain_config);
+        // Apply blocks and verify normal fork choice still works
+        let test = test
+            .apply_blocks_while(|_, state| state.finalized_checkpoint().epoch == 0)
+            .await
+            .unwrap()
+            .apply_blocks(1)
+            .await;
 
-    // Apply blocks and verify normal fork choice still works
-    let test = test
-        .apply_blocks_while(|_, state| state.finalized_checkpoint().epoch == 0)
-        .await
-        .unwrap()
-        .apply_blocks(1)
-        .await;
+        // Verify normal fork choice functionality
+        let head = test.harness.head_block_root();
+        assert!(!head.is_zero());
 
-    // Verify normal fork choice functionality
-    let head = test.harness.head_block_root();
-    assert!(!head.is_zero());
+        let finalized_epoch = test
+            .harness
+            .chain
+            .canonical_head
+            .cached_head()
+            .finalized_checkpoint()
+            .epoch;
+        assert_eq!(finalized_epoch, 2);
 
-    let finalized_epoch = test
-        .harness
-        .chain
-        .canonical_head
-        .cached_head()
-        .finalized_checkpoint()
-        .epoch;
-    assert_eq!(finalized_epoch, 2);
+        let justified_epoch = test
+            .harness
+            .chain
+            .canonical_head
+            .cached_head()
+            .justified_checkpoint()
+            .epoch;
+        assert!(justified_epoch >= 1);
 
-    let justified_epoch = test
-        .harness
-        .chain
-        .canonical_head
-        .cached_head()
-        .justified_checkpoint()
-        .epoch;
-    assert!(justified_epoch >= 1);
+        // Verify FCR returns None when disabled
+        let fast_confirmed_head = test
+            .harness
+            .chain
+            .canonical_head
+            .fork_choice_read_lock()
+            .get_fast_confirmed_head();
+        assert!(fast_confirmed_head.is_none());
+    }
 
-    // Verify FCR also works
+    // Test with FCR enabled
     #[cfg(feature = "fast_confirmation")]
     {
+        let chain_config = ChainConfig {
+            fast_confirmation_enabled: true,
+            fcr_byzantine_threshold_basis_points: 2500,
+            ..ChainConfig::default()
+        };
+
+        let test = ForkChoiceTest::new_with_chain_config(chain_config);
+
+        // Apply blocks and verify normal fork choice still works
+        let test = test
+            .apply_blocks_while(|_, state| state.finalized_checkpoint().epoch == 0)
+            .await
+            .unwrap()
+            .apply_blocks(1)
+            .await;
+
+        // Verify normal fork choice functionality
+        let head = test.harness.head_block_root();
+        assert!(!head.is_zero());
+
+        let finalized_epoch = test
+            .harness
+            .chain
+            .canonical_head
+            .cached_head()
+            .finalized_checkpoint()
+            .epoch;
+        assert_eq!(finalized_epoch, 2);
+
+        let justified_epoch = test
+            .harness
+            .chain
+            .canonical_head
+            .cached_head()
+            .justified_checkpoint()
+            .epoch;
+        assert!(justified_epoch >= 1);
+
+        // Verify FCR also works
         let fast_confirmed_head = test
             .harness
             .chain
