@@ -8,9 +8,11 @@ use beacon_chain::{
     StateSkipConfig, WhenSlotSkipped,
 };
 use fork_choice::{
-    FastConfirmationConfig, FcrMeta, ForkChoiceStore, InvalidAttestation, InvalidBlock,
-    PayloadVerificationStatus, QueuedAttestation,
+    ForkChoiceStore, InvalidAttestation, InvalidBlock, PayloadVerificationStatus, QueuedAttestation,
 };
+
+#[cfg(feature = "fast_confirmation")]
+use fork_choice::{FastConfirmationConfig, FcrMeta};
 use state_processing::state_advance::complete_state_advance;
 use std::fmt;
 use std::sync::Mutex;
@@ -1300,6 +1302,7 @@ async fn progressive_balances_cache_proposer_slashing() {
 
 /// Tests FCR configuration parsing, defaults, and propagation
 /// TODO: This test will need updates when FCR implementation is complete
+#[cfg(feature = "fast_confirmation")]
 #[tokio::test]
 async fn fcr_configuration_tests() {
     // Test with FCR enabled and custom threshold
@@ -1337,7 +1340,7 @@ async fn fcr_configuration_tests() {
     ); // 25% default
 
     // Verify the configuration is accessible through the fork choice store
-    let store = test
+    let _store = test
         .harness
         .chain
         .canonical_head
@@ -1382,7 +1385,7 @@ async fn fcr_feature_flag_tests() {
     };
 
     let test_enabled = ForkChoiceTest::new_with_chain_config(chain_config.clone());
-    let test_enabled = test_enabled
+    let _test_enabled = test_enabled
         .apply_blocks_while(|_, state| state.finalized_checkpoint().epoch == 0)
         .await
         .unwrap()
@@ -1432,6 +1435,7 @@ async fn fcr_feature_flag_tests() {
 
 /// Tests FCR configuration validation and CLI validation
 /// TODO: This test will need updates when FCR implementation is complete
+#[cfg(feature = "fast_confirmation")]
 #[test]
 fn fcr_validation_tests() {
     // Test valid configuration
@@ -1466,6 +1470,7 @@ fn fcr_validation_tests() {
 
 /// Tests that FCR metadata structures work correctly
 /// TODO: This test will need updates when FCR implementation is complete
+#[cfg(feature = "fast_confirmation")]
 #[test]
 fn fcr_metadata_structures() {
     // Test FcrMeta default
@@ -1494,6 +1499,7 @@ fn fcr_metadata_structures() {
 
 /// Tests FCR integration hooks and Byzantine threshold variations
 /// TODO: This test will need updates when FCR implementation is complete
+#[cfg(feature = "fast_confirmation")]
 #[tokio::test]
 async fn fcr_integration_and_threshold_tests() {
     // Test with FCR enabled
@@ -1506,7 +1512,7 @@ async fn fcr_integration_and_threshold_tests() {
     let test = ForkChoiceTest::new_with_chain_config(chain_config);
 
     // Apply blocks and verify FCR hooks don't cause errors
-    let test = test
+    let _test = test
         .apply_blocks_while(|_, state| state.finalized_checkpoint().epoch == 0)
         .await
         .unwrap()
@@ -1578,8 +1584,8 @@ async fn fcr_state_and_attestation_tests() {
     let initial_head = test.harness.head_block_root();
 
     // Apply more blocks
-    let test = test.apply_blocks(1).await;
-    let new_head = test.harness.head_block_root();
+    let _test = test.apply_blocks(1).await;
+    let new_head = _test.harness.head_block_root();
 
     // Heads should be different (we applied a new block)
     assert_ne!(initial_head, new_head);
@@ -1642,12 +1648,12 @@ async fn fcr_skip_slots_and_validator_tests() {
     let test = test.skip_slots(5);
 
     // Apply more blocks
-    let test = test.apply_blocks(1).await;
+    let _test = test.apply_blocks(1).await;
 
     // FCR should still work after skip slots
     #[cfg(feature = "fast_confirmation")]
     {
-        let fast_confirmed_head = test
+        let fast_confirmed_head = _test
             .harness
             .chain
             .canonical_head
@@ -1659,7 +1665,7 @@ async fn fcr_skip_slots_and_validator_tests() {
     // Test with default validator count (64) - FCR should work
     #[cfg(feature = "fast_confirmation")]
     {
-        let fast_confirmed_head = test
+        let fast_confirmed_head = _test
             .harness
             .chain
             .canonical_head
