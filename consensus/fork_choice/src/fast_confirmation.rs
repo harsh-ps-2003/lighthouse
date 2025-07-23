@@ -1,12 +1,12 @@
 //! Fast Confirmation Rule (FCR) implementation for Lighthouse.
-//! 
+//!
 //! This module implements the Fast Confirmation Rule as described in the specification,
 //! providing faster block confirmation times (12-24 seconds) compared to traditional
 //! finalization (13-19 minutes).
-//! 
+//!
 //! The FCR operates under network synchrony assumptions and uses LMD-GHOST vote weights
 //! combined with FFG checkpoint support to determine block permanence.
-//! 
+//!
 //! TODO: This is a placeholder implementation. The following components need to be implemented:
 //! - Core FCR confirmation logic (is_one_confirmed, find_latest_confirmed_descendant)
 //! - LMD-GHOST support calculation and Q-indicator computation
@@ -15,10 +15,10 @@
 //! - State access optimization using Lighthouse's tree-states architecture
 //! - Performance benchmarking and optimization
 
-use types::{Checkpoint, Hash256, Slot, Epoch, EthSpec, FixedBytesExtended};
+use proto_array::ProtoArrayForkChoice;
 use std::collections::HashMap;
 use std::marker::PhantomData;
-use proto_array::ProtoArrayForkChoice;
+use types::{Checkpoint, Epoch, EthSpec, FixedBytesExtended, Hash256, Slot};
 
 /// Configuration for the Fast Confirmation Rule.
 #[derive(Debug, Clone)]
@@ -29,23 +29,24 @@ pub struct FastConfirmationConfig {
 
 impl FastConfirmationConfig {
     /// Creates a new FCR configuration with the given Byzantine threshold.
-    /// 
+    ///
     /// # Arguments
     /// * `beta_basis_points` - Byzantine threshold in basis points (0-5000)
-    /// 
+    ///
     /// # Returns
     /// * `Ok(FcrConfig)` - Valid configuration
     /// * `Err(String)` - Invalid threshold (≥50% makes confirmation impossible)
     pub fn new(beta_basis_points: u64) -> Result<Self, String> {
         if beta_basis_points >= 5000 {
-            return Err(
-                format!("Invalid byzantine threshold: {}%, must be < 50%", beta_basis_points / 100)
-            );
+            return Err(format!(
+                "Invalid byzantine threshold: {}%, must be < 50%",
+                beta_basis_points / 100
+            ));
         }
-        
+
         Ok(Self { beta_basis_points })
     }
-    
+
     /// Returns the Byzantine threshold as a decimal fraction.
     pub fn beta_fraction(&self) -> f64 {
         self.beta_basis_points as f64 / 10000.0
@@ -110,19 +111,19 @@ impl<E: EthSpec> FastConfirmation<E> {
             phantom: PhantomData,
         }
     }
-    
+
     /// Returns the current confirmed root.
     pub fn confirmed_root(&self) -> Hash256 {
         self.confirmed_root
     }
-    
+
     /// Returns the FCR configuration.
     pub fn config(&self) -> &FastConfirmationConfig {
         &self.config
     }
-    
+
     /// Gets the latest confirmed block root.
-    /// 
+    ///
     /// TODO: Implement the core FCR logic to determine the latest confirmed block
     /// along the canonical chain. For now, this is a placeholder implementation that
     /// returns the current confirmed root.
@@ -139,9 +140,9 @@ impl<E: EthSpec> FastConfirmation<E> {
         // For now, return the current confirmed root
         self.confirmed_root
     }
-    
+
     /// Updates FCR state after finding a new head.
-    /// 
+    ///
     /// TODO: Implement FCR state update logic after fork choice determines a new head.
     /// This method is called after the fork choice has determined a new head,
     /// allowing FCR to update its internal state and potentially confirm new blocks.
@@ -158,7 +159,7 @@ impl<E: EthSpec> FastConfirmation<E> {
         // For now, this is a no-op placeholder
         Ok(())
     }
-    
+
     /// Ensures the committee weight cache doesn't exceed its capacity.
     fn trim_committee_weight_cache(&mut self) {
         const MAX_CACHE_SIZE: usize = 100;
@@ -168,7 +169,7 @@ impl<E: EthSpec> FastConfirmation<E> {
             self.committee_weight_cache.clear();
         }
     }
-    
+
     /// Ensures the FFG support cache doesn't exceed its capacity.
     fn trim_ffg_support_cache(&mut self) {
         const MAX_CACHE_SIZE: usize = 50;

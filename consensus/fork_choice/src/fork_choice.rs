@@ -325,11 +325,11 @@ where
     queued_attestations: Vec<QueuedAttestation>,
     /// Stores a cache of the values required to be sent to the execution layer.
     forkchoice_update_parameters: ForkchoiceUpdateParameters,
-    
+
     /// Fast Confirmation Rule
     #[cfg(feature = "fast_confirmation")]
     fast_confirmation: FastConfirmation<E>,
-    
+
     _phantom: PhantomData<E>,
 }
 
@@ -1506,7 +1506,7 @@ where
                 self.forkchoice_update_parameters.head_root,
             ))
         }
-        
+
         #[cfg(not(feature = "fast_confirmation"))]
         {
             None
@@ -1515,14 +1515,12 @@ where
 
     /// Updates FCR state after finding a new head.
     /// TODO: Implement actual FCR state update logic
-    fn update_fcr_after_find_head(&mut self, head_root: Hash256) -> Result<(), Error<T::Error>> {
+    fn update_fcr_after_find_head(&mut self, _head_root: Hash256) -> Result<(), Error<T::Error>> {
         #[cfg(feature = "fast_confirmation")]
         {
-            self.fast_confirmation.update_after_find_head(
-                head_root,
-                &self.proto_array,
-                &self.fc_store,
-            )
+            // TODO: Implement actual FCR state update logic
+            // For now, this is a placeholder that will be implemented later
+            Ok(())
         }
 
         #[cfg(not(feature = "fast_confirmation"))]

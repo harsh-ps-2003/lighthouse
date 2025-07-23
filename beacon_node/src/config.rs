@@ -805,13 +805,16 @@ pub fn get_config<E: EthSpec>(
     #[cfg(feature = "fast_confirmation")]
     {
         client_config.chain.fast_confirmation_enabled = cli_args.get_flag("fast-confirmation");
-        
-        if let Some(threshold) = clap_utils::parse_optional::<u64>(cli_args, "fcr-byzantine-threshold")? {
+
+        if let Some(threshold) =
+            clap_utils::parse_optional::<u64>(cli_args, "fcr-byzantine-threshold")?
+        {
             // Validate that the threshold is within valid range (0-49%)
             if threshold >= 50 {
                 return Err("FCR Byzantine threshold must be less than 50% to ensure confirmation is mathematically possible".to_string());
             }
-            client_config.chain.fcr_byzantine_threshold_basis_points = threshold * 100; // Convert percentage to basis points
+            client_config.chain.fcr_byzantine_threshold_basis_points = threshold * 100;
+            // Convert percentage to basis points
         }
     }
 

@@ -2853,7 +2853,7 @@ fn fast_confirmation_cli_integration() {
 #[test]
 fn fast_confirmation_cli_validation() {
     // Test CLI-level validation (not algorithm validation)
-    
+
     #[cfg(feature = "fast_confirmation")]
     {
         // Test invalid Byzantine threshold (≥50%)
@@ -2861,7 +2861,7 @@ fn fast_confirmation_cli_validation() {
             .flag("fast-confirmation", None)
             .flag("fcr-byzantine-threshold", Some("50"))
             .run_with_zero_port();
-        
+
         assert!(result.is_err());
         let error_msg = result.unwrap_err().to_string();
         assert!(error_msg.contains("FCR Byzantine threshold must be less than 50%"));
@@ -2871,7 +2871,7 @@ fn fast_confirmation_cli_validation() {
             .flag("fast-confirmation", None)
             .flag("fcr-byzantine-threshold", Some("invalid"))
             .run_with_zero_port();
-        
+
         assert!(result.is_err());
         let error_msg = result.unwrap_err().to_string();
         assert!(error_msg.contains("invalid digit found in string"));
@@ -2881,7 +2881,7 @@ fn fast_confirmation_cli_validation() {
 #[test]
 fn fast_confirmation_end_to_end_integration() {
     // Test end-to-end integration with other CLI flags
-    
+
     #[cfg(feature = "fast_confirmation")]
     {
         // Test FCR works with other flags
