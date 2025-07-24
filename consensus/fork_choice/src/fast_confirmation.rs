@@ -19,6 +19,8 @@ use proto_array::ProtoArrayForkChoice;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use types::{Checkpoint, Epoch, EthSpec, FixedBytesExtended, Hash256, Slot};
+use std::num::NonZeroUsize;
+use lru::LruCache;
 
 /// Configuration for the Fast Confirmation Rule.
 #[derive(Debug, Clone)]
@@ -85,8 +87,10 @@ pub struct FcrStore {
     pub prev_slot_unrealized_justified_checkpoint: Checkpoint,
     /// Previous slot's head block
     pub prev_slot_head: Hash256,
-    /// Cache for committee weight calculations (bounded to 100 entries)
-    pub committee_weight_cache: HashMap<(Epoch, Slot, Slot), u64>,
+    /// LRU cache for last 100 committee weight calculations 
+    pub committee_weight_lru: LruCache<(Epoch, Slot, Slot), u64>,
+    /// LRU cache for last 50 FFG support calculations 
+    pub ffg_support_lru: LruCache<(Checkpoint, Checkpoint), u64>,
 }
 
 impl Default for FcrStore {
@@ -96,7 +100,8 @@ impl Default for FcrStore {
             prev_slot_justified_checkpoint: Checkpoint::default(),
             prev_slot_unrealized_justified_checkpoint: Checkpoint::default(),
             prev_slot_head: Hash256::zero(),
-            committee_weight_cache: HashMap::with_capacity(100),
+            committee_weight_lru: LruCache::new(NonZeroUsize::new(100).unwrap()),
+            ffg_support_lru: LruCache::new(NonZeroUsize::new(50).unwrap()),
         }
     }
 }
@@ -107,8 +112,6 @@ pub struct FastConfirmation<E: EthSpec> {
     config: FastConfirmationConfig,
     /// Per-block FCR metadata, keyed by block root
     meta: HashMap<Hash256, FcrMeta>,
-    /// Cache for FFG support calculations (bounded to 50 entries)
-    ffg_support_cache: HashMap<(Checkpoint, Checkpoint), u64>,
     /// FCR state store (confirmed root, prev slot checkpoints, etc)
     fcr_store: FcrStore,
     /// Phantom data to hold the EthSpec type parameter
@@ -121,7 +124,6 @@ impl<E: EthSpec> FastConfirmation<E> {
         Self {
             config,
             meta: HashMap::new(),
-            ffg_support_cache: HashMap::with_capacity(50), // Cache last 50 FFG calculations
             fcr_store: FcrStore::default(),
             phantom: PhantomData,
         }
@@ -178,20 +180,20 @@ impl<E: EthSpec> FastConfirmation<E> {
     /// Ensures the committee weight cache doesn't exceed its capacity.
     fn trim_committee_weight_cache(&mut self) {
         const MAX_CACHE_SIZE: usize = 100;
-        if self.fcr_store.committee_weight_cache.len() > MAX_CACHE_SIZE {
+        if self.fcr_store.committee_weight_lru.len() > MAX_CACHE_SIZE {
             // Simple eviction: clear the entire cache when it gets too large
             // TODO: In a production implementation, we'd use a proper LRU eviction
-            self.fcr_store.committee_weight_cache.clear();
+            self.fcr_store.committee_weight_lru.clear();
         }
     }
 
     /// Ensures the FFG support cache doesn't exceed its capacity.
     fn trim_ffg_support_cache(&mut self) {
         const MAX_CACHE_SIZE: usize = 50;
-        if self.ffg_support_cache.len() > MAX_CACHE_SIZE {
+        if self.fcr_store.ffg_support_lru.len() > MAX_CACHE_SIZE {
             // Simple eviction: clear the entire cache when it gets too large
             // TODO: In a production implementation, we'd use a proper LRU eviction
-            self.ffg_support_cache.clear();
+            self.fcr_store.ffg_support_lru.clear();
         }
     }
 }
