@@ -1,3 +1,6 @@
+use fork_choice::fast_confirmation::{
+    FastConfirmationConfig, DEFAULT_FCR_BYZANTINE_THRESHOLD_PERCENTAGE,
+};
 pub use proto_array::{DisallowedReOrgOffsets, ReOrgThreshold};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
@@ -10,8 +13,6 @@ pub const DEFAULT_RE_ORG_MAX_EPOCHS_SINCE_FINALIZATION: Epoch = Epoch::new(2);
 /// Default to 1/12th of the slot, which is 1 second on mainnet.
 pub const DEFAULT_RE_ORG_CUTOFF_DENOMINATOR: u32 = 12;
 pub const DEFAULT_FORK_CHOICE_BEFORE_PROPOSAL_TIMEOUT: u64 = 250;
-/// Default Byzantine threshold for Fast Confirmation Rule in basis points (25%).
-pub const DEFAULT_FCR_BYZANTINE_THRESHOLD_BASIS_POINTS: u64 = 2500;
 
 /// Default fraction of a slot lookahead for payload preparation (12/3 = 4 seconds on mainnet).
 pub const DEFAULT_PREPARE_PAYLOAD_LOOKAHEAD_FACTOR: u32 = 3;
@@ -64,12 +65,12 @@ pub struct ChainConfig {
     /// This experimental feature provides 12-24 second confirmation times under optimal
     /// network conditions by analyzing LMD-GHOST and FFG vote weights.
     pub fast_confirmation_enabled: bool,
-    /// Byzantine threshold for Fast Confirmation Rule in basis points (0-4900).
+    /// Byzantine threshold for Fast Confirmation Rule in percentage (0-49).
     ///
     /// This represents the maximum fraction of Byzantine stake the algorithm assumes.
     /// Higher values provide stronger safety guarantees but may reduce confirmation speed.
-    /// Default: 2500 (25%).
-    pub fcr_byzantine_threshold_basis_points: u64,
+    /// Default: 25%.
+    pub fcr_byzantine_threshold_percentage: u64,
     /// Number of skip slots in a row before the BN refuses to use connected builders during payload construction.
     pub builder_fallback_skips: usize,
     /// Number of skip slots in the past `SLOTS_PER_EPOCH` before the BN refuses to use connected
@@ -143,7 +144,7 @@ impl Default for ChainConfig {
             re_org_disallowed_offsets: DisallowedReOrgOffsets::default(),
             fork_choice_before_proposal_timeout_ms: DEFAULT_FORK_CHOICE_BEFORE_PROPOSAL_TIMEOUT,
             fast_confirmation_enabled: false,
-            fcr_byzantine_threshold_basis_points: DEFAULT_FCR_BYZANTINE_THRESHOLD_BASIS_POINTS,
+            fcr_byzantine_threshold_percentage: DEFAULT_FCR_BYZANTINE_THRESHOLD_PERCENTAGE,
             // Builder fallback configs that are set in `clap` will override these.
             builder_fallback_skips: 3,
             builder_fallback_skips_per_epoch: 8,
@@ -179,5 +180,17 @@ impl ChainConfig {
             .unwrap_or_else(|| {
                 Duration::from_secs(seconds_per_slot) / DEFAULT_RE_ORG_CUTOFF_DENOMINATOR
             })
+    }
+
+    /// Returns FCR configuration if enabled, None otherwise.
+    pub fn fcr_config(&self) -> Option<FastConfirmationConfig> {
+        if self.fast_confirmation_enabled {
+            Some(
+                FastConfirmationConfig::new(self.fcr_byzantine_threshold_percentage)
+                    .expect("FCR threshold should be validated during config parsing"),
+            )
+        } else {
+            None
+        }
     }
 }

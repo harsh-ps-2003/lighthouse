@@ -1,3 +1,6 @@
+use crate::fast_confirmation::{
+    FastConfirmation, FastConfirmationConfig, DEFAULT_FCR_BYZANTINE_THRESHOLD_PERCENTAGE,
+};
 use crate::metrics::{self, scrape_for_metrics};
 use crate::{ForkChoiceStore, InvalidationOperation};
 use logging::crit;
@@ -20,9 +23,6 @@ use types::{
     Epoch, EthSpec, ExecPayload, ExecutionBlockHash, FixedBytesExtended, Hash256,
     IndexedAttestationRef, RelativeEpoch, SignedBeaconBlock, Slot,
 };
-
-#[cfg(feature = "fast_confirmation")]
-use crate::fast_confirmation::{FastConfirmation, FastConfirmationConfig};
 
 #[derive(Debug)]
 pub enum Error<T> {
@@ -327,8 +327,7 @@ where
     forkchoice_update_parameters: ForkchoiceUpdateParameters,
 
     /// Fast Confirmation Rule
-    #[cfg(feature = "fast_confirmation")]
-    fast_confirmation: FastConfirmation<E>,
+    fast_confirmation: Option<FastConfirmation<E>>,
 
     _phantom: PhantomData<E>,
 }
@@ -357,6 +356,8 @@ where
         anchor_block: &SignedBeaconBlock<E>,
         anchor_state: &BeaconState<E>,
         current_slot: Option<Slot>,
+        fcr_enabled: bool,
+        fcr_threshold: Option<u64>,
         spec: &ChainSpec,
     ) -> Result<Self, Error<T::Error>> {
         // Sanity check: the anchor must lie on an epoch boundary.
@@ -418,8 +419,17 @@ where
                 // This will be updated during the next call to `Self::get_head`.
                 head_root: Hash256::zero(),
             },
-            #[cfg(feature = "fast_confirmation")]
-            fast_confirmation: FastConfirmation::<E>::new(FastConfirmationConfig::new(2500)?),
+            fast_confirmation: if fcr_enabled {
+                // `fcr_threshold` is expressed in percentage (e.g. 25 = 25%).
+                // If no custom threshold was supplied, fall back to the default configured value.
+                let threshold_pct =
+                    fcr_threshold.unwrap_or(DEFAULT_FCR_BYZANTINE_THRESHOLD_PERCENTAGE);
+                Some(FastConfirmation::new(FastConfirmationConfig::new(
+                    threshold_pct,
+                )?))
+            } else {
+                None
+            },
             _phantom: PhantomData,
         };
 
@@ -1432,6 +1442,9 @@ where
         persisted: PersistedForkChoice,
         reset_payload_statuses: ResetPayloadStatuses,
         fc_store: T,
+        // Add FCR parameters directly
+        fcr_enabled: bool,
+        fcr_threshold: Option<u64>,
         spec: &ChainSpec,
     ) -> Result<Self, Error<T::Error>> {
         let proto_array =
@@ -1448,11 +1461,19 @@ where
                 head_hash: None,
                 justified_hash: None,
                 finalized_hash: None,
-                // Will be updated in the following call to `Self::get_head`.
                 head_root: Hash256::zero(),
             },
-            #[cfg(feature = "fast_confirmation")]
-            fast_confirmation: FastConfirmation::<E>::new(FastConfirmationConfig::new(2500)?),
+            fast_confirmation: if fcr_enabled {
+                // `fcr_threshold` is expressed in percentage (e.g. 25 = 25%).
+                // If no custom threshold was supplied, fall back to the default configured value.
+                let threshold_pct =
+                    fcr_threshold.unwrap_or(DEFAULT_FCR_BYZANTINE_THRESHOLD_PERCENTAGE);
+                Some(FastConfirmation::new(FastConfirmationConfig::new(
+                    threshold_pct,
+                )?))
+            } else {
+                None
+            },
             _phantom: PhantomData,
         };
 
@@ -1496,37 +1517,27 @@ where
     // FCR Integration Methods :
 
     /// Returns the fast confirmed head if FCR is enabled, otherwise None.
-    /// TODO: Implement actual FCR confirmation logic
     pub fn get_fast_confirmed_head(&self) -> Option<Hash256> {
-        #[cfg(feature = "fast_confirmation")]
-        {
-            Some(self.fast_confirmation.get_latest_confirmed(
+        self.fast_confirmation.as_ref().and_then(|fcr| {
+            fcr.get_latest_confirmed(
                 &self.proto_array,
                 &self.fc_store,
                 self.forkchoice_update_parameters.head_root,
-            ))
-        }
+            )
+        })
+    }
 
-        #[cfg(not(feature = "fast_confirmation"))]
-        {
-            None
-        }
+    /// Returns whether Fast Confirmation Rule is enabled
+    pub fn is_fast_confirmation_enabled(&self) -> bool {
+        self.fast_confirmation.is_some()
     }
 
     /// Updates FCR state after finding a new head.
-    /// TODO: Implement actual FCR state update logic
-    fn update_fcr_after_find_head(&mut self, _head_root: Hash256) -> Result<(), Error<T::Error>> {
-        #[cfg(feature = "fast_confirmation")]
-        {
-            // TODO: Implement actual FCR state update logic
-            // For now, this is a placeholder that will be implemented later
-            Ok(())
+    fn update_fcr_after_find_head(&mut self, head_root: Hash256) -> Result<(), Error<T::Error>> {
+        if let Some(fcr) = &mut self.fast_confirmation {
+            fcr.update_after_find_head(head_root, &self.proto_array, &self.fc_store)?;
         }
-
-        #[cfg(not(feature = "fast_confirmation"))]
-        {
-            Ok(())
-        }
+        Ok(())
     }
 }
 

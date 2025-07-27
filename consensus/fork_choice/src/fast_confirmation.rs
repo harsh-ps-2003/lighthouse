@@ -15,43 +15,45 @@
 //! - State access optimization using Lighthouse's tree-states architecture
 //! - Performance benchmarking and optimization
 
+use lru::LruCache;
 use proto_array::ProtoArrayForkChoice;
 use std::collections::HashMap;
 use std::marker::PhantomData;
-use types::{Checkpoint, Epoch, EthSpec, FixedBytesExtended, Hash256, Slot};
 use std::num::NonZeroUsize;
-use lru::LruCache;
+use types::{Checkpoint, Epoch, EthSpec, FixedBytesExtended, Hash256, Slot};
 
+/// Default Byzantine threshold in percentage (25%)
+pub const DEFAULT_FCR_BYZANTINE_THRESHOLD_PERCENTAGE: u64 = 25;
 /// Configuration for the Fast Confirmation Rule.
 #[derive(Debug, Clone)]
 pub struct FastConfirmationConfig {
-    /// Byzantine threshold in basis points (e.g., 2500 = 25%)
-    pub beta_basis_points: u64,
+    /// Byzantine threshold in percentage (e.g., 25 = 25%)
+    pub beta_percentage: u64,
 }
 
 impl FastConfirmationConfig {
     /// Creates a new FCR configuration with the given Byzantine threshold.
     ///
     /// # Arguments
-    /// * `beta_basis_points` - Byzantine threshold in basis points (0-5000)
+    /// * `beta_percentage` - Byzantine threshold in percentage (0-49)
     ///
     /// # Returns
     /// * `Ok(FcrConfig)` - Valid configuration
     /// * `Err(String)` - Invalid threshold (≥50% makes confirmation impossible)
-    pub fn new(beta_basis_points: u64) -> Result<Self, String> {
-        if beta_basis_points >= 5000 {
+    pub fn new(beta_percentage: u64) -> Result<Self, String> {
+        if beta_percentage >= 50 {
             return Err(format!(
                 "Invalid byzantine threshold: {}%, must be < 50%",
-                beta_basis_points / 100
+                beta_percentage
             ));
         }
 
-        Ok(Self { beta_basis_points })
+        Ok(Self { beta_percentage })
     }
 
-    /// Returns the Byzantine threshold as a decimal fraction.
-    pub fn beta_fraction(&self) -> f64 {
-        self.beta_basis_points as f64 / 10000.0
+    /// Converts the percentage threshold to basis points for internal calculations.
+    pub fn beta_basis_points(&self) -> u64 {
+        self.beta_percentage * 100
     }
 }
 
@@ -87,9 +89,9 @@ pub struct FcrStore {
     pub prev_slot_unrealized_justified_checkpoint: Checkpoint,
     /// Previous slot's head block
     pub prev_slot_head: Hash256,
-    /// LRU cache for last 100 committee weight calculations 
+    /// LRU cache for last 100 committee weight calculations
     pub committee_weight_lru: LruCache<(Epoch, Slot, Slot), u64>,
-    /// LRU cache for last 50 FFG support calculations 
+    /// LRU cache for last 50 FFG support calculations
     pub ffg_support_lru: LruCache<(Checkpoint, Checkpoint), u64>,
 }
 
@@ -134,28 +136,154 @@ impl<E: EthSpec> FastConfirmation<E> {
         self.fcr_store.confirmed_root
     }
 
+    /// Returns the previous slot's justified checkpoint.
+    pub fn prev_slot_justified_checkpoint(&self) -> Checkpoint {
+        self.fcr_store.prev_slot_justified_checkpoint
+    }
+
+    /// Returns the previous slot's unrealized justified checkpoint.
+    pub fn prev_slot_unrealized_justified_checkpoint(&self) -> Checkpoint {
+        self.fcr_store.prev_slot_unrealized_justified_checkpoint
+    }
+
+    /// Returns the previous slot's head block.
+    pub fn prev_slot_head(&self) -> Hash256 {
+        self.fcr_store.prev_slot_head
+    }
+
     /// Returns the FCR configuration.
     pub fn config(&self) -> &FastConfirmationConfig {
         &self.config
+    }
+
+    /// Updates FCR state when transitioning to a new slot.
+    ///
+    /// This method should be called at the beginning of each new slot to update
+    /// the FCR state according to the specification. It performs the following operations:
+    ///
+    /// 1. Updates the confirmed root to the latest confirmed block
+    /// 2. Stores the previous slot's justified checkpoint
+    /// 3. Stores the previous slot's unrealized justified checkpoint  
+    /// 4. Stores the previous slot's head block
+    /// 5. Cleans up expired cache entries
+    ///
+    /// # Arguments
+    /// * `proto_array` - The proto array containing the block DAG
+    /// * `fc_store` - The fork choice store containing current state
+    /// * `current_slot` - The new slot we're transitioning to
+    /// * `head_root` - The current head block root
+    ///
+    /// # Returns
+    /// * `Ok(())` - Successfully updated FCR state
+    /// * `Err(Error)` - Error occurred during state update
+    pub fn update_per_slot<T>(
+        &mut self,
+        proto_array: &ProtoArrayForkChoice,
+        fc_store: &T,
+        current_slot: Slot,
+        head_root: Hash256,
+    ) -> Result<(), crate::Error<T::Error>>
+    where
+        T: crate::ForkChoiceStore<E>,
+    {
+        // Store the previous slot's state before updating
+        self.fcr_store.prev_slot_justified_checkpoint = *fc_store.justified_checkpoint();
+        self.fcr_store.prev_slot_unrealized_justified_checkpoint =
+            *fc_store.unrealized_justified_checkpoint();
+        self.fcr_store.prev_slot_head = head_root;
+
+        // Update the confirmed root to the latest confirmed block
+        if let Some(new_confirmed_root) =
+            self.get_latest_confirmed(proto_array, fc_store, head_root)
+        {
+            self.fcr_store.confirmed_root = new_confirmed_root;
+        }
+
+
+
+        // TODO: Implement additional slot transition logic:
+        // - Clear expired proposer boost data
+        // - Update epoch boundary state if crossing epoch boundary
+        // - Process any pending FCR state transitions
+
+        Ok(())
+    }
+
+    /// Updates FCR state for a new slot transition.
+    ///
+    /// This is a convenience method that can be called from the fork choice's `on_tick`
+    /// method to update FCR state when transitioning to a new slot. It uses the current
+    /// head from the fork choice update parameters.
+    ///
+    /// # Arguments
+    /// * `proto_array` - The proto array containing the block DAG
+    /// * `fc_store` - The fork choice store containing current state
+    /// * `current_slot` - The new slot we're transitioning to
+    /// * `head_root` - The current head block root (from fork choice)
+    ///
+    /// # Returns
+    /// * `Ok(())` - Successfully updated FCR state
+    /// * `Err(Error)` - Error occurred during state update
+    pub fn on_new_slot<T>(
+        &mut self,
+        proto_array: &ProtoArrayForkChoice,
+        fc_store: &T,
+        current_slot: Slot,
+        head_root: Hash256,
+    ) -> Result<(), crate::Error<T::Error>>
+    where
+        T: crate::ForkChoiceStore<E>,
+    {
+        // Call the main update method
+        self.update_per_slot(proto_array, fc_store, current_slot, head_root)
+    }
+
+    /// Updates FCR state using fork choice update parameters.
+    ///
+    /// This method is designed to be called from the fork choice system using
+    /// the cached fork choice update parameters. It's a convenience wrapper
+    /// that extracts the head root from the update parameters.
+    ///
+    /// # Arguments
+    /// * `proto_array` - The proto array containing the block DAG
+    /// * `fc_store` - The fork choice store containing current state
+    /// * `current_slot` - The new slot we're transitioning to
+    /// * `forkchoice_params` - The fork choice update parameters containing the head
+    ///
+    /// # Returns
+    /// * `Ok(())` - Successfully updated FCR state
+    /// * `Err(Error)` - Error occurred during state update
+    pub fn on_new_slot_with_params<T>(
+        &mut self,
+        proto_array: &ProtoArrayForkChoice,
+        fc_store: &T,
+        current_slot: Slot,
+        forkchoice_params: &crate::ForkchoiceUpdateParameters,
+    ) -> Result<(), crate::Error<T::Error>>
+    where
+        T: crate::ForkChoiceStore<E>,
+    {
+        let head_root = forkchoice_params.head_root;
+        self.on_new_slot(proto_array, fc_store, current_slot, head_root)
     }
 
     /// Gets the latest confirmed block root.
     ///
     /// TODO: Implement the core FCR logic to determine the latest confirmed block
     /// along the canonical chain. For now, this is a placeholder implementation that
-    /// returns the current confirmed root.
+    /// returns None until the full FCR logic is implemented.
     pub fn get_latest_confirmed<T>(
         &self,
         _proto_array: &ProtoArrayForkChoice,
         _fc_store: &T,
         _head_root: Hash256,
-    ) -> Hash256
+    ) -> Option<Hash256>
     where
         T: crate::ForkChoiceStore<E>,
     {
         // TODO: Implement full FCR logic here
-        // For now, return the current confirmed root
-        self.fcr_store.confirmed_root
+        // For now, return None as the FCR logic is not yet implemented
+        None
     }
 
     /// Updates FCR state after finding a new head.
@@ -177,23 +305,5 @@ impl<E: EthSpec> FastConfirmation<E> {
         Ok(())
     }
 
-    /// Ensures the committee weight cache doesn't exceed its capacity.
-    fn trim_committee_weight_cache(&mut self) {
-        const MAX_CACHE_SIZE: usize = 100;
-        if self.fcr_store.committee_weight_lru.len() > MAX_CACHE_SIZE {
-            // Simple eviction: clear the entire cache when it gets too large
-            // TODO: In a production implementation, we'd use a proper LRU eviction
-            self.fcr_store.committee_weight_lru.clear();
-        }
-    }
 
-    /// Ensures the FFG support cache doesn't exceed its capacity.
-    fn trim_ffg_support_cache(&mut self) {
-        const MAX_CACHE_SIZE: usize = 50;
-        if self.fcr_store.ffg_support_lru.len() > MAX_CACHE_SIZE {
-            // Simple eviction: clear the entire cache when it gets too large
-            // TODO: In a production implementation, we'd use a proper LRU eviction
-            self.fcr_store.ffg_support_lru.clear();
-        }
-    }
 }

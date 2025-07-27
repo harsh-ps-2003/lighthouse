@@ -15,9 +15,6 @@ path = "src/lib.rs"
 write_ssz_files = [
     "beacon_chain/write_ssz_files",
 ] # Writes debugging .ssz files to /tmp during block processing.
-fast_confirmation = [
-    "fork_choice/fast_confirmation",
-] # Enable Fast Confirmation Rule (FCR) for faster block confirmation.
 
 [dependencies]
 account_utils = { workspace = true }

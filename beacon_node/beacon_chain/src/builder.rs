@@ -255,6 +255,10 @@ where
                 self.chain_config.always_reset_payload_statuses,
             ),
             &self.spec,
+            self.chain_config.fast_confirmation_enabled,
+            self.chain_config
+                .fcr_config()
+                .map(|cfg| cfg.beta_percentage),
         )
         .map_err(|e| format!("Unable to load fork choice from disk: {:?}", e))?
         .ok_or("Fork choice not found in store")?;
@@ -404,6 +408,10 @@ where
             &genesis.beacon_block,
             &genesis.beacon_state,
             current_slot,
+            self.chain_config.fast_confirmation_enabled,
+            self.chain_config
+                .fcr_config()
+                .map(|cfg| cfg.beta_percentage),
             &self.spec,
         )
         .map_err(|e| format!("Unable to initialize ForkChoice: {:?}", e))?;
@@ -625,6 +633,10 @@ where
             &snapshot.beacon_block,
             &snapshot.beacon_state,
             Some(weak_subj_slot),
+            self.chain_config.fast_confirmation_enabled,
+            self.chain_config
+                .fcr_config()
+                .map(|cfg| cfg.beta_percentage),
             &self.spec,
         )
         .map_err(|e| format!("Unable to initialize ForkChoice: {:?}", e))?;

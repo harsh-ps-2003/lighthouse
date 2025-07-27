@@ -6,7 +6,7 @@ use strum::VariantNames;
 
 #[allow(clippy::large_stack_frames)]
 pub fn cli_app() -> Command {
-    let cmd = Command::new("beacon_node")
+    Command::new("beacon_node")
         .display_order(0)
         .visible_aliases(["b", "bn", "beacon"])
         .version(crate_version!())
@@ -1654,23 +1654,15 @@ pub fn cli_app() -> Command {
                 .action(ArgAction::Set)
                 .hide(true)
         )
-        .group(ArgGroup::new("enable_http").args(["http", "gui", "staking"]).multiple(true));
-
-    // Add FCR arguments conditionally
-    add_fcr_args(cmd)
-}
-
-/// Helper function to conditionally add FCR CLI arguments
-fn add_fcr_args(cmd: Command) -> Command {
-    #[cfg(feature = "fast_confirmation")]
-    {
-        cmd.arg(
+        .group(ArgGroup::new("enable_http").args(["http", "gui", "staking"]).multiple(true))
+        // Add FCR-specific flags
+        .arg(
             Arg::new("fast-confirmation")
                 .long("fast-confirmation")
                 .help(
                     "Enable the Fast Confirmation Rule (FCR) for faster block confirmation. \
-                       This experimental feature provides 12-24 second confirmation times under \
-                       optimal network conditions by analyzing LMD-GHOST and FFG vote weights.",
+                     This experimental feature provides 12-24 second confirmation times under \
+                     optimal network conditions by analyzing LMD-GHOST and FFG vote weights.",
                 )
                 .action(ArgAction::SetTrue)
                 .help_heading(FLAG_HEADER)
@@ -1682,19 +1674,12 @@ fn add_fcr_args(cmd: Command) -> Command {
                 .value_name("PERCENTAGE")
                 .help(
                     "Set the Byzantine threshold for Fast Confirmation Rule as a percentage \
-                       (0-49). This represents the maximum fraction of Byzantine stake the \
-                       algorithm assumes. Higher values provide stronger safety guarantees but \
-                       may reduce confirmation speed. Default: 25%",
+                     (0-49). This represents the maximum fraction of Byzantine stake the \
+                     algorithm assumes. Higher values provide stronger safety guarantees but \
+                     may reduce confirmation speed. Default: 25%",
                 )
-                .default_value("25")
                 .action(ArgAction::Set)
                 .display_order(0)
                 .requires("fast-confirmation"),
         )
-    }
-
-    #[cfg(not(feature = "fast_confirmation"))]
-    {
-        cmd
-    }
 }

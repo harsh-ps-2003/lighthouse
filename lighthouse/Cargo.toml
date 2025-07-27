@@ -35,8 +35,6 @@ beacon-node-leveldb = ["store/leveldb"]
 beacon-node-redb = ["store/redb"]
 # Supports console subscriber for debugging
 console-subscriber = ["console-subscriber/default"]
-# Enable Fast Confirmation Rule
-fast_confirmation = ["fork_choice/fast_confirmation"]
 # Turns off jemalloc so that heaptrack may be used to analyse memory usage.
 heaptrack = []
 
