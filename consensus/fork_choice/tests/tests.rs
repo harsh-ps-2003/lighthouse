@@ -1595,7 +1595,7 @@ async fn fcr_state_and_attestation_tests() {
     let test = test
         .apply_attestation_to_chain(
             MutationDelay::NoDelay,
-            |_, _| {}, 
+            |_, _| {},
             |result| assert!(result.is_ok()),
         )
         .await;

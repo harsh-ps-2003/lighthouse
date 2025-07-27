@@ -199,8 +199,6 @@ impl<E: EthSpec> FastConfirmation<E> {
             self.fcr_store.confirmed_root = new_confirmed_root;
         }
 
-
-
         // TODO: Implement additional slot transition logic:
         // - Clear expired proposer boost data
         // - Update epoch boundary state if crossing epoch boundary
@@ -304,6 +302,4 @@ impl<E: EthSpec> FastConfirmation<E> {
         // For now, this is a no-op placeholder
         Ok(())
     }
-
-
 }
