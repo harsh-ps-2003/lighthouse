@@ -50,11 +50,6 @@ impl FastConfirmationConfig {
 
         Ok(Self { beta_percentage })
     }
-
-    /// Converts the percentage threshold to basis points for internal calculations.
-    pub fn beta_basis_points(&self) -> u64 {
-        self.beta_percentage * 100
-    }
 }
 
 /// Metadata for a block's FCR status.
