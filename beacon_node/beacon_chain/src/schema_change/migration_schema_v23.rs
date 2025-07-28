@@ -103,6 +103,8 @@ pub fn downgrade_from_v23<T: BeaconChainTypes>(
         persisted_fork_choice.fork_choice,
         reset_payload_statuses,
         fc_store,
+        false,
+        None,
         &db.spec,
     )
     .map_err(|e| {

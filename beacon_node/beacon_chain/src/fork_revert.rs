@@ -151,6 +151,8 @@ pub fn reset_fork_choice_to_finalization<E: EthSpec, Hot: ItemStore<E>, Cold: It
         &finalized_snapshot.beacon_block,
         &finalized_snapshot.beacon_state,
         current_slot,
+        false,
+        None,
         spec,
     )
     .map_err(|e| format!("Unable to reset fork choice for revert: {:?}", e))?;

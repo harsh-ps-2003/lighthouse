@@ -14,8 +14,12 @@ proto_array = { workspace = true }
 state_processing = { workspace = true }
 tracing = { workspace = true }
 types = { workspace = true }
+lru = { workspace = true }
 
 [dev-dependencies]
 beacon_chain = { workspace = true }
 store = { workspace = true }
 tokio = { workspace = true }
+
+[features]
+default = []

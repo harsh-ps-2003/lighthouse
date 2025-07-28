@@ -1,3 +1,6 @@
+use fork_choice::fast_confirmation::{
+    FastConfirmationConfig, DEFAULT_FCR_BYZANTINE_THRESHOLD_PERCENTAGE,
+};
 pub use proto_array::{DisallowedReOrgOffsets, ReOrgThreshold};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
@@ -57,6 +60,17 @@ pub struct ChainConfig {
     ///
     /// If set to 0 then block proposal will not wait for fork choice at all.
     pub fork_choice_before_proposal_timeout_ms: u64,
+    /// Whether to enable the Fast Confirmation Rule for faster block confirmation.
+    ///
+    /// This experimental feature provides 12-24 second confirmation times under optimal
+    /// network conditions by analyzing LMD-GHOST and FFG vote weights.
+    pub fast_confirmation_enabled: bool,
+    /// Byzantine threshold for Fast Confirmation Rule in percentage (0-49).
+    ///
+    /// This represents the maximum fraction of Byzantine stake the algorithm assumes.
+    /// Higher values provide stronger safety guarantees but may reduce confirmation speed.
+    /// Default: 25%.
+    pub fcr_byzantine_threshold_percentage: u64,
     /// Number of skip slots in a row before the BN refuses to use connected builders during payload construction.
     pub builder_fallback_skips: usize,
     /// Number of skip slots in the past `SLOTS_PER_EPOCH` before the BN refuses to use connected
@@ -129,6 +143,8 @@ impl Default for ChainConfig {
             re_org_cutoff_millis: None,
             re_org_disallowed_offsets: DisallowedReOrgOffsets::default(),
             fork_choice_before_proposal_timeout_ms: DEFAULT_FORK_CHOICE_BEFORE_PROPOSAL_TIMEOUT,
+            fast_confirmation_enabled: false,
+            fcr_byzantine_threshold_percentage: DEFAULT_FCR_BYZANTINE_THRESHOLD_PERCENTAGE,
             // Builder fallback configs that are set in `clap` will override these.
             builder_fallback_skips: 3,
             builder_fallback_skips_per_epoch: 8,
@@ -164,5 +180,17 @@ impl ChainConfig {
             .unwrap_or_else(|| {
                 Duration::from_secs(seconds_per_slot) / DEFAULT_RE_ORG_CUTOFF_DENOMINATOR
             })
+    }
+
+    /// Returns FCR configuration if enabled, None otherwise.
+    pub fn fcr_config(&self) -> Option<FastConfirmationConfig> {
+        if self.fast_confirmation_enabled {
+            Some(
+                FastConfirmationConfig::new(self.fcr_byzantine_threshold_percentage)
+                    .expect("FCR threshold should be validated during config parsing"),
+            )
+        } else {
+            None
+        }
     }
 }

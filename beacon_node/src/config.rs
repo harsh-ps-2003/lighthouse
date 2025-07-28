@@ -13,6 +13,7 @@ use client::{ClientConfig, ClientGenesis};
 use directory::{DEFAULT_BEACON_NODE_DIR, DEFAULT_NETWORK_DIR, DEFAULT_ROOT_DIR};
 use environment::RuntimeContext;
 use execution_layer::DEFAULT_JWT_FILE;
+use fork_choice::fast_confirmation::DEFAULT_FCR_BYZANTINE_THRESHOLD_PERCENTAGE;
 use http_api::TlsConfig;
 use lighthouse_network::ListenAddress;
 use lighthouse_network::{multiaddr::Protocol, Enr, Multiaddr, NetworkConfig, PeerIdSerialized};
@@ -799,6 +800,32 @@ pub fn get_config<E: EthSpec>(
         clap_utils::parse_optional(cli_args, "fork-choice-before-proposal-timeout")?
     {
         client_config.chain.fork_choice_before_proposal_timeout_ms = timeout;
+    }
+
+    // Fast Confirmation Rule configuration
+    client_config.chain.fast_confirmation_enabled = cli_args.get_flag("fast-confirmation");
+
+    if client_config.chain.fast_confirmation_enabled {
+        // Parse threshold if provided, otherwise use default
+        if let Some(threshold_str) = cli_args.get_one::<String>("fcr-byzantine-threshold") {
+            let threshold = threshold_str
+                .parse::<u64>()
+                .map_err(|e| format!("Invalid FCR byzantine threshold: {}", e))?;
+
+            if threshold >= 50 {
+                return Err("FCR byzantine threshold must be less than 50%".into());
+            }
+
+            client_config.chain.fcr_byzantine_threshold_percentage = threshold;
+        } else {
+            // Use default when FCR is enabled but no threshold specified
+            client_config.chain.fcr_byzantine_threshold_percentage =
+                DEFAULT_FCR_BYZANTINE_THRESHOLD_PERCENTAGE;
+        }
+    } else {
+        // FCR disabled, set to default (won't be used)
+        client_config.chain.fcr_byzantine_threshold_percentage =
+            DEFAULT_FCR_BYZANTINE_THRESHOLD_PERCENTAGE;
     }
 
     client_config.chain.always_reset_payload_statuses = cli_args.get_flag("reset-payload-statuses");

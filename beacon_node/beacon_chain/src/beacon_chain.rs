@@ -617,6 +617,8 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         store: BeaconStore<T>,
         reset_payload_statuses: ResetPayloadStatuses,
         spec: &ChainSpec,
+        fcr_enabled: bool,
+        fcr_threshold: Option<u64>,
     ) -> Result<Option<BeaconForkChoice<T>>, Error> {
         let Some(persisted_fork_choice) =
             store.get_item::<PersistedForkChoice>(&FORK_CHOICE_DB_KEY)?
@@ -631,6 +633,9 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             persisted_fork_choice.fork_choice,
             reset_payload_statuses,
             fc_store,
+            // FCR parameters passed from caller
+            fcr_enabled,
+            fcr_threshold,
             spec,
         )?))
     }

@@ -288,9 +288,14 @@ impl<T: BeaconChainTypes> CanonicalHead<T> {
         store: &BeaconStore<T>,
         spec: &ChainSpec,
     ) -> Result<(), Error> {
-        let fork_choice =
-            <BeaconChain<T>>::load_fork_choice(store.clone(), reset_payload_statuses, spec)?
-                .ok_or(Error::MissingPersistedForkChoice)?;
+        let fork_choice = <BeaconChain<T>>::load_fork_choice(
+            store.clone(),
+            reset_payload_statuses,
+            spec,
+            false,
+            None,
+        )?
+        .ok_or(Error::MissingPersistedForkChoice)?;
         let fork_choice_view = fork_choice.cached_fork_choice_view();
         let beacon_block_root = fork_choice_view.head_block_root;
         let beacon_block = store

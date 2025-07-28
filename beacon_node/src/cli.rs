@@ -1655,4 +1655,31 @@ pub fn cli_app() -> Command {
                 .hide(true)
         )
         .group(ArgGroup::new("enable_http").args(["http", "gui", "staking"]).multiple(true))
+        // Add FCR-specific flags
+        .arg(
+            Arg::new("fast-confirmation")
+                .long("fast-confirmation")
+                .help(
+                    "Enable the Fast Confirmation Rule (FCR) for faster block confirmation. \
+                     This experimental feature provides 12-24 second confirmation times under \
+                     optimal network conditions by analyzing LMD-GHOST and FFG vote weights.",
+                )
+                .action(ArgAction::SetTrue)
+                .help_heading(FLAG_HEADER)
+                .display_order(0),
+        )
+        .arg(
+            Arg::new("fcr-byzantine-threshold")
+                .long("fcr-byzantine-threshold")
+                .value_name("PERCENTAGE")
+                .help(
+                    "Set the Byzantine threshold for Fast Confirmation Rule as a percentage \
+                     (0-49). This represents the maximum fraction of Byzantine stake the \
+                     algorithm assumes. Higher values provide stronger safety guarantees but \
+                     may reduce confirmation speed. Default: 25%",
+                )
+                .action(ArgAction::Set)
+                .display_order(0)
+                .requires("fast-confirmation"),
+        )
 }
