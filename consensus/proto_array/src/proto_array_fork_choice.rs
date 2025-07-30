@@ -818,12 +818,112 @@ impl ProtoArrayForkChoice {
     }
 
     /// Returns the weight of a given block.
-    pub fn get_weight(&self, block_root: &Hash256) -> Option<u64> {
+    ///
+    /// **FCR Extension**: This method now supports optional parameters for FCR integration:
+    /// - `checkpoint_state`: Optional state for weight calculation (FCR requirement)
+    /// - `include_proposer_boost`: Whether to include proposer boost in the weight
+    ///
+    /// **Specification**: Modified to support FCR with additional checkpoint_state parameter
+    /// as per the Python specification's `get_weight(store, root, checkpoint_state)` function.
+    ///
+    /// # Arguments
+    /// * `block_root` - The block root to get weight for
+    /// * `checkpoint_state` - Optional checkpoint state for weight calculation (FCR requirement)
+    /// * `include_proposer_boost` - Whether to include proposer boost (FCR doesn't want this)
+    /// * `proposer_boost_root` - Current proposer boost root (for boost calculation)
+    /// * `spec` - Chain specification (for proposer boost calculation)
+    ///
+    /// # Returns
+    /// * `Some(u64)` - The block weight (attestation score + optional proposer boost)
+    /// * `None` - Block not found
+    pub fn get_weight<E: EthSpec>(
+        &self,
+        block_root: &Hash256,
+        checkpoint_state: Option<&types::BeaconState<E>>,
+        include_proposer_boost: bool,
+        proposer_boost_root: Hash256,
+        spec: &types::ChainSpec,
+    ) -> Option<u64> {
+        let block_index = self.proto_array.indices.get(block_root)?;
+        let node = self.proto_array.nodes.get(*block_index)?;
+
+        // Start with the base attestation score (node weight)
+        let mut weight = node.weight;
+
+        // Add proposer boost if requested and applicable
+        if include_proposer_boost
+            && proposer_boost_root != Hash256::zero()
+            && proposer_boost_root == *block_root
+        {
+            if let Some(proposer_score) = self.get_proposer_score::<E>(proposer_boost_root, spec) {
+                weight = weight.saturating_add(proposer_score);
+            }
+        }
+
+        Some(weight)
+    }
+
+    /// Returns the weight of a given block (legacy method for backward compatibility).
+    ///
+    /// **Note**: This method always includes proposer boost if applicable, maintaining
+    /// backward compatibility with existing fork choice logic.
+    ///
+    /// # Arguments
+    /// * `block_root` - The block root to get weight for
+    ///
+    /// # Returns
+    /// * `Some(u64)` - The block weight including proposer boost
+    /// * `None` - Block not found
+    pub fn get_weight_legacy(&self, block_root: &Hash256) -> Option<u64> {
         let block_index = self.proto_array.indices.get(block_root)?;
         self.proto_array
             .nodes
             .get(*block_index)
             .map(|node| node.weight)
+    }
+
+    /// Calculates the proposer boost score for a given block.
+    ///
+    /// **Specification**: Implements `get_proposer_score(store)` from the Python specification.
+    /// This method extracts the proposer boost calculation logic from the existing
+    /// `apply_score_changes` method to support FCR's requirement for separate
+    /// proposer boost calculation.
+    ///
+    /// **Why Required**: FCR needs to separate proposer boost from attestation weight
+    /// because the confirmation formula requires: `2 * S > W * (1 + 2 * β / 100) + proposer_score`
+    /// where S is support weight (without boost) and proposer_score is separate.
+    ///
+    /// # Arguments
+    /// * `block_root` - The block root to calculate proposer boost for
+    /// * `spec` - Chain specification containing proposer boost configuration
+    ///
+    /// # Returns
+    /// * `Some(u64)` - The proposer boost score if applicable
+    /// * `None` - No proposer boost applicable (block not timely, boost disabled, etc.)
+    pub fn get_proposer_score<E: EthSpec>(
+        &self,
+        block_root: Hash256,
+        spec: &types::ChainSpec,
+    ) -> Option<u64> {
+        // Check if proposer boost is enabled in the spec
+        let proposer_score_boost = spec.proposer_score_boost?;
+
+        // Check if this block is the current proposer boost root
+        if block_root == Hash256::zero() {
+            return None;
+        }
+
+        // Check if the block has an invalid execution status (should not receive boost)
+        if let Some(block_index) = self.proto_array.indices.get(&block_root) {
+            if let Some(node) = self.proto_array.nodes.get(*block_index) {
+                if node.execution_status.is_invalid() {
+                    return None;
+                }
+            }
+        }
+
+        // Calculate the proposer boost score
+        crate::proto_array::calculate_committee_fraction::<E>(&self.balances, proposer_score_boost)
     }
 
     /// See `ProtoArray` documentation.

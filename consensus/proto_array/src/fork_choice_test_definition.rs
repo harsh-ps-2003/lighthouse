@@ -275,11 +275,26 @@ impl ForkChoiceTestDefinition {
                         .process_execution_payload_invalidation::<MainnetEthSpec>(&op)
                         .unwrap()
                 }
-                Operation::AssertWeight { block_root, weight } => assert_eq!(
-                    fork_choice.get_weight(&block_root).unwrap(),
-                    weight,
-                    "block weight"
-                ),
+                Operation::AssertWeight { block_root, weight } => {
+                    // NOTE: Using get_weight_legacy instead of get_weight for backward compatibility
+                    //
+                    // After FCR implementation, get_weight() was enhanced with additional parameters:
+                    // - checkpoint_state: Option<&BeaconState<E>> (for FCR weight calculation)
+                    // - include_proposer_boost: bool (FCR needs to separate boost from support)
+                    // - proposer_boost_root: Hash256 (for boost calculation)
+                    // - spec: &ChainSpec (for boost calculation)
+                    //
+                    // The test framework predates FCR and only needs basic weight verification.
+                    // get_weight_legacy() provides the simple API that tests expect:
+                    // - Returns raw node.weight without complex FCR logic
+                    // - Maintains backward compatibility for existing test vectors
+                    // - Avoids the need to mock FCR-specific parameters in tests
+                    assert_eq!(
+                        fork_choice.get_weight_legacy(&block_root).unwrap(),
+                        weight,
+                        "block weight"
+                    )
+                }
             }
         }
     }

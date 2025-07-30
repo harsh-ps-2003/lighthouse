@@ -16,8 +16,8 @@ use std::sync::Arc;
 use store::{Error as StoreError, HotColdDB, ItemStore};
 use superstruct::superstruct;
 use types::{
-    AbstractExecPayload, BeaconBlockRef, BeaconState, BeaconStateError, Checkpoint, Epoch, EthSpec,
-    FixedBytesExtended, Hash256, Slot,
+    AbstractExecPayload, BeaconBlockRef, BeaconState, BeaconStateError, ChainSpec, Checkpoint,
+    Epoch, EthSpec, FixedBytesExtended, Hash256, Slot,
 };
 
 #[derive(Debug)]
@@ -343,6 +343,10 @@ where
 
     fn extend_equivocating_indices(&mut self, indices: impl IntoIterator<Item = u64>) {
         self.equivocating_indices.extend(indices);
+    }
+
+    fn chain_spec(&self) -> &ChainSpec {
+        self.store.get_chain_spec().as_ref()
     }
 }
 

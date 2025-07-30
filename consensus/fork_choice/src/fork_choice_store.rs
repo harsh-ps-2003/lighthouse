@@ -59,6 +59,15 @@ pub trait ForkChoiceStore<E: EthSpec>: Sized {
     /// Returns the `proposer_boost_root`.
     fn proposer_boost_root(&self) -> Hash256;
 
+    /// Returns the chain specification.
+    ///
+    /// **FCR Requirement**: This method is required for FCR's `get_proposer_score` calculations
+    /// which need access to the `proposer_score_boost` configuration from the chain spec.
+    ///
+    /// # Returns
+    /// * `&ChainSpec` - Reference to the chain specification
+    fn chain_spec(&self) -> &types::ChainSpec;
+
     /// Sets `finalized_checkpoint`.
     fn set_finalized_checkpoint(&mut self, checkpoint: Checkpoint);
 
