@@ -1293,6 +1293,35 @@ where
             .is_descendant(ancestor_root, descendant_root)
     }
 
+    /// Checks if a block is an ancestor of another block.
+    ///
+    /// **Python Specification**: `is_ancestor(store, root, ancestor)`
+    ///
+    /// **Why Required**: This function is used to ensure blocks are on the canonical chain
+    /// and for confirmation inheritance. It's a fundamental building block for FCR logic
+    /// that determines block relationships in the DAG.
+    ///
+    /// **Specification**: Returns true if `ancestor` is an ancestor of `root` in the block DAG.
+    /// A block is considered an ancestor of itself.
+    ///
+    /// # Arguments
+    /// * `root` - The descendant block root to check
+    /// * `ancestor` - The potential ancestor block root
+    ///
+    /// # Returns
+    /// * `bool` - True if `ancestor` is an ancestor of `root`, false otherwise
+    pub fn is_ancestor(&self, root: &Hash256, ancestor: &Hash256) -> bool {
+        // A block is an ancestor of itself
+        if root == ancestor {
+            return true;
+        }
+
+        // Use the existing is_descendant method with swapped arguments
+        // is_descendant(ancestor, root) checks if root is a descendant of ancestor
+        // which is equivalent to ancestor being an ancestor of root
+        self.is_descendant(*ancestor, *root)
+    }
+
     /// Returns `Ok(true)` if `block_root` has been imported optimistically or deemed invalid.
     ///
     /// Returns `Ok(false)` if `block_root`'s execution payload has been elected as fully VALID, if

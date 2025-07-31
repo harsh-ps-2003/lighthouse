@@ -7,13 +7,10 @@
 //! The FCR operates under network synchrony assumptions and uses LMD-GHOST vote weights
 //! combined with FFG checkpoint support to determine block permanence.
 //!
-//! TODO: This is a placeholder implementation. The following components need to be implemented:
-//! - Core FCR confirmation logic (is_one_confirmed, find_latest_confirmed_descendant)
-//! - LMD-GHOST support calculation and Q-indicator computation
-//! - FFG integration with lazy evaluation
-//! - Committee weight estimation and safety adjustments
-//! - State access optimization using Lighthouse's tree-states architecture
+//! TODO: The following components still need to be implemented:
 //! - Performance benchmarking and optimization
+//! - Additional FFG integration features
+//! - Advanced state access optimizations
 
 use crate::Error::ProtoArrayStringError;
 use lru::LruCache;
@@ -189,6 +186,75 @@ impl<E: EthSpec> FastConfirmation<E> {
     /// Returns the FCR configuration.
     pub fn config(&self) -> &FastConfirmationConfig {
         &self.config
+    }
+
+    /// Checks if a block is an ancestor of another block.
+    ///
+    /// **Python Specification**: `is_ancestor(store, root, ancestor)`
+    ///
+    /// **Why Required**: This function is used to ensure blocks are on the canonical chain
+    /// and for confirmation inheritance. It's a fundamental building block for FCR logic
+    /// that determines block relationships in the DAG.
+    ///
+    /// **Specification**: Returns true if `ancestor` is an ancestor of `root` in the block DAG.
+    /// A block is considered an ancestor of itself.
+    ///
+    /// # Arguments
+    /// * `proto_array` - The proto array containing the block DAG
+    /// * `root` - The descendant block root to check
+    /// * `ancestor` - The potential ancestor block root
+    ///
+    /// # Returns
+    /// * `bool` - True if `ancestor` is an ancestor of `root`, false otherwise
+    pub fn is_ancestor(
+        &self,
+        proto_array: &ProtoArrayForkChoice,
+        root: Hash256,
+        ancestor: Hash256,
+    ) -> bool {
+        // A block is an ancestor of itself
+        if root == ancestor {
+            return true;
+        }
+
+        // Check if both blocks exist in the proto array
+        let root_block = match proto_array.get_block(&root) {
+            Some(block) => block,
+            None => return false, // Root doesn't exist
+        };
+
+        let ancestor_block = match proto_array.get_block(&ancestor) {
+            Some(block) => block,
+            None => return false, // Ancestor doesn't exist
+        };
+
+        // Walk up the chain from root to find the ancestor
+        let mut current_root = root;
+        let mut depth = 0;
+        const MAX_ANCESTOR_DEPTH: usize = 1000; // Safety limit to prevent infinite loops
+
+        while depth < MAX_ANCESTOR_DEPTH {
+            let current_block = match proto_array.get_block(&current_root) {
+                Some(block) => block,
+                None => break, // Reached a block that doesn't exist
+            };
+
+            // Check if we've found the ancestor
+            if current_root == ancestor {
+                return true;
+            }
+
+            // Move to parent
+            if let Some(parent_root) = current_block.parent_root {
+                current_root = parent_root;
+                depth += 1;
+            } else {
+                // Reached genesis (no parent)
+                break;
+            }
+        }
+
+        false
     }
 
     /// Checks if a block is confirmed by FCR.

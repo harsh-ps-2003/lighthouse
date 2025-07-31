@@ -1719,6 +1719,183 @@ async fn fcr_mark_confirmed_tests() {
     );
 }
 
+/// Tests the is_ancestor functionality for FCR
+#[tokio::test]
+async fn fcr_is_ancestor_tests() {
+    let config = ChainConfig {
+        fast_confirmation_enabled: true,
+        fcr_byzantine_threshold_percentage: DEFAULT_FCR_BYZANTINE_THRESHOLD_PERCENTAGE,
+        ..ChainConfig::default()
+    };
+    let test = ForkChoiceTest::new_with_chain_config(config);
+    let test = test
+        .apply_blocks_while(|_, state| state.finalized_checkpoint().epoch == 0)
+        .await
+        .unwrap()
+        .apply_blocks(5)
+        .await; // Create a chain with multiple blocks
+
+    let fork_choice = test.harness.chain.canonical_head.fork_choice_read_lock();
+    let proto_array = fork_choice.proto_array();
+
+    // Self-ancestor relationship
+    let head_root = test.harness.head_block_root();
+    assert!(!head_root.is_zero(), "Should have a valid head");
+
+    // A block should be an ancestor of itself
+    assert!(
+        fork_choice.is_ancestor(&head_root, &head_root),
+        "Block should be ancestor of itself"
+    );
+
+    // Direct parent-child relationship
+    // Get the head block and its parent
+    let head_block = proto_array
+        .get_block(&head_root)
+        .expect("Head block should exist");
+    if let Some(parent_root) = head_block.parent_root {
+        // Head should be descendant of parent
+        assert!(
+            fork_choice.is_ancestor(&head_root, &parent_root),
+            "Head should be descendant of its parent"
+        );
+        // Parent should not be descendant of head
+        assert!(
+            !fork_choice.is_ancestor(&parent_root, &head_root),
+            "Parent should not be descendant of head"
+        );
+    }
+
+    // Multi-generation ancestor relationship
+    // Walk up the chain to find a grandparent
+    let mut current_root = head_root;
+    let mut grandparent_root = None;
+    let mut depth = 0;
+    const MAX_DEPTH: usize = 10;
+
+    while depth < MAX_DEPTH {
+        let current_block = proto_array
+            .get_block(&current_root)
+            .expect("Block should exist");
+        if let Some(parent_root) = current_block.parent_root {
+            let parent_block = proto_array
+                .get_block(&parent_root)
+                .expect("Parent should exist");
+            if let Some(grandparent) = parent_block.parent_root {
+                grandparent_root = Some(grandparent);
+                break;
+            }
+            current_root = parent_root;
+            depth += 1;
+        } else {
+            break; // Reached genesis
+        }
+    }
+
+    if let Some(grandparent) = grandparent_root {
+        // Head should be descendant of grandparent
+        assert!(
+            fork_choice.is_ancestor(&head_root, &grandparent),
+            "Head should be descendant of its grandparent"
+        );
+        // Grandparent should not be descendant of head
+        assert!(
+            !fork_choice.is_ancestor(&grandparent, &head_root),
+            "Grandparent should not be descendant of head"
+        );
+    }
+
+    // Non-existent blocks
+    let fake_root = Hash256::from_low_u64_be(999999);
+    assert!(
+        !fork_choice.is_ancestor(&fake_root, &head_root),
+        "Non-existent block should not be ancestor"
+    );
+    assert!(
+        !fork_choice.is_ancestor(&head_root, &fake_root),
+        "Non-existent block should not be ancestor"
+    );
+
+    // Genesis block relationship
+    // Find genesis block by walking to the root
+    let mut genesis_root = head_root;
+    let mut depth = 0;
+    const MAX_GENESIS_DEPTH: usize = 100;
+
+    while depth < MAX_GENESIS_DEPTH {
+        let current_block = proto_array
+            .get_block(&genesis_root)
+            .expect("Block should exist");
+        if let Some(parent_root) = current_block.parent_root {
+            genesis_root = parent_root;
+            depth += 1;
+        } else {
+            break; // Reached genesis (no parent)
+        }
+    }
+
+    // Genesis should be ancestor of head
+    assert!(
+        fork_choice.is_ancestor(&head_root, &genesis_root),
+        "Genesis should be ancestor of head"
+    );
+    // Head should not be ancestor of genesis
+    assert!(
+        !fork_choice.is_ancestor(&genesis_root, &head_root),
+        "Head should not be ancestor of genesis"
+    );
+
+    // Confirmation inheritance using is_ancestor
+    // Apply more blocks to test confirmation inheritance
+    drop(fork_choice);
+    let test = test.apply_blocks(3).await;
+
+    let fork_choice = test.harness.chain.canonical_head.fork_choice_read_lock();
+    let new_head_root = test.harness.head_block_root();
+    let new_proto_array = fork_choice.proto_array();
+
+    // The old head should be an ancestor of the new head
+    assert!(
+        fork_choice.is_ancestor(&new_head_root, &head_root),
+        "Old head should be ancestor of new head"
+    );
+
+    // Fork scenario (if we can create one)
+    // This would require creating a fork in the test, which is complex
+    // For now, we test that blocks in the same chain have proper ancestor relationships
+
+    // Get all blocks in the chain and verify ancestor relationships
+    let mut current_root = new_head_root;
+    let mut chain_blocks = vec![current_root];
+    let mut depth = 0;
+    const MAX_CHAIN_DEPTH: usize = 20;
+
+    while depth < MAX_CHAIN_DEPTH {
+        let current_block = new_proto_array
+            .get_block(&current_root)
+            .expect("Block should exist");
+        if let Some(parent_root) = current_block.parent_root {
+            chain_blocks.push(parent_root);
+            current_root = parent_root;
+            depth += 1;
+        } else {
+            break; // Reached genesis
+        }
+    }
+
+    // Verify that each block is an ancestor of all blocks that come after it in the chain
+    for (i, ancestor) in chain_blocks.iter().enumerate() {
+        for descendant in chain_blocks.iter().take(i) {
+            assert!(
+                fork_choice.is_ancestor(descendant, ancestor),
+                "Block {} should be ancestor of block {}",
+                ancestor,
+                descendant
+            );
+        }
+    }
+}
+
 /// Tests FCR metadata pruning behavior
 #[tokio::test]
 async fn fcr_pruning_behavior_tests() {
