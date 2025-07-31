@@ -335,12 +335,12 @@ impl<E: EthSpec> FastConfirmation<E> {
         T: crate::ForkChoiceStore<E>,
     {
         let mut confirmed_root = self.fcr_store.confirmed_root;
-        let current_epoch = fc_store.get_current_slot() / E::slots_per_epoch();
+        let current_epoch = fc_store.get_current_slot().epoch(E::slots_per_epoch());
 
         // Safety check: revert to finalized block if confirmed block is too old
         // or doesn't belong to canonical chain (equivalent to Python spec's safety checks)
         if let Some(confirmed_block) = proto_array.get_block(&confirmed_root) {
-            let confirmed_block_epoch = confirmed_block.slot / E::slots_per_epoch();
+            let confirmed_block_epoch = confirmed_block.slot.epoch(E::slots_per_epoch());
 
             // Check if confirmed block is from 2+ epochs ago or not in canonical chain
             if confirmed_block_epoch + 1 < current_epoch
@@ -595,7 +595,7 @@ impl<E: EthSpec> FastConfirmation<E> {
     where
         T: crate::ForkChoiceStore<E>,
     {
-        let current_epoch = fc_store.get_current_slot() / E::slots_per_epoch();
+        let current_epoch = fc_store.get_current_slot().epoch(E::slots_per_epoch());
         let mut confirmed_root = confirmed_root;
 
         // Get the confirmed block to check its epoch
@@ -604,7 +604,7 @@ impl<E: EthSpec> FastConfirmation<E> {
             None => return None,
         };
 
-        let confirmed_block_epoch = confirmed_block.slot / E::slots_per_epoch();
+        let confirmed_block_epoch = confirmed_block.slot.epoch(E::slots_per_epoch());
 
         // First condition: Previous epoch advancement
         if confirmed_block_epoch + 1 == current_epoch
@@ -666,7 +666,7 @@ impl<E: EthSpec> FastConfirmation<E> {
     {
         // Simplified implementation: check if voting source is recent enough
         // In a full implementation, this would check the voting source epoch
-        let current_epoch = fc_store.get_current_slot() / E::slots_per_epoch();
+        let current_epoch = fc_store.get_current_slot().epoch(E::slots_per_epoch());
         let voting_source_epoch = if current_epoch.as_u64() > 0 {
             current_epoch.as_u64() - 1
         } else {
@@ -699,7 +699,7 @@ impl<E: EthSpec> FastConfirmation<E> {
     {
         // Simplified implementation: check if unrealized justification is recent enough
         // In a full implementation, this would check the unrealized justification epoch
-        let current_epoch = fc_store.get_current_slot() / E::slots_per_epoch();
+        let current_epoch = fc_store.get_current_slot().epoch(E::slots_per_epoch());
         let unrealized_epoch = if current_epoch.as_u64() > 0 {
             current_epoch.as_u64() - 1
         } else {
