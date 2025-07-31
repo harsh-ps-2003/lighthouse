@@ -191,6 +191,23 @@ impl<E: EthSpec> FastConfirmation<E> {
         &self.config
     }
 
+    /// Checks if a block is confirmed by FCR.
+    ///
+    /// **Why Required**: This method provides a simple way to check confirmation status
+    /// without exposing internal metadata structures. It's used by tests and other
+    /// parts of the codebase to verify FCR behavior.
+    ///
+    /// # Arguments
+    /// * `block_root` - The block root to check
+    ///
+    /// # Returns
+    /// * `bool` - True if the block is confirmed, false otherwise
+    pub fn is_block_confirmed(&self, block_root: &Hash256) -> bool {
+        self.meta
+            .get(block_root)
+            .map_or(false, |meta| meta.confirmed)
+    }
+
     /// Updates FCR state when transitioning to a new slot.
     ///
     /// This method is the Lighthouse adaptation of the Python specification's
@@ -548,8 +565,7 @@ impl<E: EthSpec> FastConfirmation<E> {
     /// * `block_root` - The block root to mark as confirmed
     /// * `proto_array` - The proto array containing the block DAG
     fn mark_confirmed(&mut self, block_root: Hash256, proto_array: &ProtoArrayForkChoice) {
-        // TODO: Implement confirmation inheritance logic
-        // For now, just mark the specific block
+        // Mark the specific block as confirmed
         if let Some(meta) = self.meta.get_mut(&block_root) {
             meta.confirmed = true;
         } else {
@@ -564,9 +580,64 @@ impl<E: EthSpec> FastConfirmation<E> {
             );
         }
 
-        // TODO: Implement full descendant confirmation inheritance
-        // For now, we only mark the specific block. In a full implementation,
-        // we would traverse all descendants and mark them as confirmed as well.
+        // Mark all descendants as confirmed
+        self.mark_descendants_confirmed(block_root, proto_array);
+    }
+
+    /// Recursively marks all descendants of a confirmed block as confirmed.
+    ///
+    /// **Why Required**: When a parent block is confirmed, all its descendants inherit
+    /// the confirmation status. This is a key property of FCR that ensures consistency
+    /// across the block DAG.
+    ///
+    /// # Arguments
+    /// * `parent_root` - The parent block root whose descendants should be marked
+    /// * `proto_array` - The proto array containing the block DAG
+    fn mark_descendants_confirmed(
+        &mut self,
+        parent_root: Hash256,
+        proto_array: &ProtoArrayForkChoice,
+    ) {
+        // Get all blocks in the proto array to find descendants
+        let mut to_process = vec![parent_root];
+        let mut processed = std::collections::HashSet::new();
+
+        while let Some(current_root) = to_process.pop() {
+            if processed.contains(&current_root) {
+                continue;
+            }
+            processed.insert(current_root);
+
+            // Find all blocks that have current_root as their parent
+            // We need to iterate through all blocks in the proto array
+            // Since there's no direct iterator, we'll use the indices HashMap
+            let proto_array_ref = proto_array.core_proto_array();
+            for (block_root, _) in &proto_array_ref.indices {
+                if let Some(block) = proto_array.get_block(block_root) {
+                    if let Some(parent) = block.parent_root {
+                        if parent == current_root {
+                            // This is a descendant, mark it as confirmed
+                            if let Some(meta) = self.meta.get_mut(block_root) {
+                                meta.confirmed = true;
+                            } else {
+                                // Create new metadata if it doesn't exist
+                                self.meta.insert(
+                                    *block_root,
+                                    FcrMeta {
+                                        support: 0,
+                                        committee_weight: 0,
+                                        confirmed: true,
+                                    },
+                                );
+                            }
+
+                            // Add this descendant to the processing queue
+                            to_process.push(*block_root);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Finds the latest confirmed descendant along the canonical chain.

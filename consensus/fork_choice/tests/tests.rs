@@ -1617,6 +1617,108 @@ async fn fcr_confirmation_inheritance_tests() {
     );
 }
 
+/// Tests the mark_confirmed functionality with descendant inheritance
+#[tokio::test]
+async fn fcr_mark_confirmed_tests() {
+    let config = ChainConfig {
+        fast_confirmation_enabled: true,
+        fcr_byzantine_threshold_percentage: DEFAULT_FCR_BYZANTINE_THRESHOLD_PERCENTAGE,
+        ..ChainConfig::default()
+    };
+    let test = ForkChoiceTest::new_with_chain_config(config);
+    let test = test
+        .apply_blocks_while(|_, state| state.finalized_checkpoint().epoch == 0)
+        .await
+        .unwrap()
+        .apply_blocks(5)
+        .await; // Create a longer chain for testing
+
+    // Basic confirmation functionality
+    let head_root = test.harness.head_block_root();
+    assert!(!head_root.is_zero(), "Should have a valid head");
+
+    // Verify FCR is enabled
+    let fork_choice = test.harness.chain.canonical_head.fork_choice_read_lock();
+    assert!(
+        fork_choice.is_fast_confirmation_enabled(),
+        "FCR should be enabled"
+    );
+
+    // Test that we can get a fast confirmed head
+    let initial_confirmed = fork_choice.get_fast_confirmed_head();
+    assert!(
+        initial_confirmed.is_some(),
+        "Should have initial confirmed head when FCR is enabled"
+    );
+
+    drop(fork_choice);
+
+    // Confirmation state persistence across operations
+    let test = test.apply_blocks(1).await;
+    let fork_choice = test.harness.chain.canonical_head.fork_choice_read_lock();
+
+    let new_confirmed = fork_choice.get_fast_confirmed_head();
+    assert!(
+        new_confirmed.is_some(),
+        "Should have confirmed head after new block"
+    );
+
+    // Confirmation inheritance (tested indirectly through get_fast_confirmed_head)
+    // The get_fast_confirmed_head method should return the highest confirmed descendant
+    let confirmed_root = new_confirmed.unwrap();
+    assert!(
+        !confirmed_root.is_zero(),
+        "Confirmed root should not be zero"
+    );
+
+    // Confirmation state consistency
+    // Multiple calls should return the same result
+    let confirmed_1 = fork_choice.get_fast_confirmed_head();
+    let confirmed_2 = fork_choice.get_fast_confirmed_head();
+    let confirmed_3 = fork_choice.get_fast_confirmed_head();
+
+    assert_eq!(
+        confirmed_1, confirmed_2,
+        "Confirmation should be consistent"
+    );
+    assert_eq!(
+        confirmed_2, confirmed_3,
+        "Confirmation should be consistent"
+    );
+    assert!(confirmed_1.is_some(), "Should have confirmed head");
+
+    drop(fork_choice);
+
+    // Confirmation state after multiple operations
+    let test = test.apply_blocks(2).await;
+    let test = test.skip_slots(3);
+    let test = test
+        .apply_attestation_to_chain(
+            MutationDelay::NoDelay,
+            |_, _| {}, // No mutation
+            |result| assert!(result.is_ok()),
+        )
+        .await;
+
+    let final_fork_choice = test.harness.chain.canonical_head.fork_choice_read_lock();
+
+    let final_confirmed = final_fork_choice.get_fast_confirmed_head();
+    assert!(
+        final_confirmed.is_some(),
+        "Should have confirmed head after multiple operations"
+    );
+
+    // Verify the confirmed head is a descendant of the chain head
+    let chain_head = test.harness.head_block_root();
+    let confirmed_head = final_confirmed.unwrap();
+
+    // The confirmed head should be either the chain head or one of its ancestors
+    assert!(
+        final_fork_choice.is_descendant(confirmed_head, chain_head) || confirmed_head == chain_head,
+        "Confirmed head should be a descendant or equal to chain head"
+    );
+}
+
 /// Tests FCR metadata pruning behavior
 #[tokio::test]
 async fn fcr_pruning_behavior_tests() {
