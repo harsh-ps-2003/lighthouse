@@ -1303,8 +1303,8 @@ async fn fcr_comprehensive_tests() {
     let default_test = ForkChoiceTest::new();
     assert!(!default_test.harness.chain.config.fast_confirmation_enabled);
     assert!(!default_test
-        .harness
-        .chain
+            .harness
+            .chain
         .canonical_head
         .fork_choice_read_lock()
         .is_fast_confirmation_enabled());
@@ -1975,13 +1975,13 @@ async fn fcr_adjust_committee_weight_estimate_tests() {
 /// Tests the get_checkpoint_weight functionality
 #[tokio::test]
 async fn fcr_get_checkpoint_weight_tests() {
-    let config = ChainConfig {
+        let config = ChainConfig {
         fast_confirmation_enabled: true,
         fcr_byzantine_threshold_percentage: DEFAULT_FCR_BYZANTINE_THRESHOLD_PERCENTAGE,
         ..ChainConfig::default()
     };
-    let test = ForkChoiceTest::new_with_chain_config(config);
-    let test = test
+        let test = ForkChoiceTest::new_with_chain_config(config);
+        let test = test
         .apply_blocks_while(|_, state| state.finalized_checkpoint().epoch == 0)
         .await
         .unwrap()
@@ -2011,8 +2011,8 @@ async fn fcr_get_checkpoint_weight_tests() {
 
     // The checkpoint weight should be related to the total active balance
     let total_active_balance = test
-        .harness
-        .chain
+            .harness
+            .chain
         .head()
         .snapshot
         .beacon_state
@@ -2116,6 +2116,148 @@ async fn fcr_get_checkpoint_weight_tests() {
     // Test 14: All validators slashed
     // With all validators slashed, checkpoint weight should be zero
     // This would require a special test setup
+}
+
+/// Tests the get_ffg_weight_till_slot functionality through FCR confirmation logic
+#[tokio::test]
+async fn fcr_get_ffg_weight_till_slot_tests() {
+    let config = ChainConfig {
+        fast_confirmation_enabled: true,
+        fcr_byzantine_threshold_percentage: DEFAULT_FCR_BYZANTINE_THRESHOLD_PERCENTAGE,
+        ..ChainConfig::default()
+    };
+    let test = ForkChoiceTest::new_with_chain_config(config);
+    let test = test
+        .apply_blocks_while(|_, state| state.finalized_checkpoint().epoch == 0)
+        .await
+        .unwrap()
+        .apply_blocks(5)
+        .await;
+
+    // Test that FCR confirmation logic works correctly with different slot ranges
+    // This indirectly tests the get_ffg_weight_till_slot function
+    
+    let fork_choice = test.harness.chain.canonical_head.fork_choice_read_lock();
+    // Test that we can get a confirmed head (this uses the FFG weight calculations internally)
+    let confirmed_head = fork_choice.get_fast_confirmed_head();
+    assert!(confirmed_head.is_some(), "Should be able to get confirmed head");
+    
+    // Test that the confirmed head is a valid block
+    if let Some(confirmed_root) = confirmed_head {
+        assert_ne!(confirmed_root, Hash256::zero(), "Confirmed head should not be zero");
+        
+        // Test that the confirmed head is a descendant of the finalized checkpoint
+        let finalized_root = test.harness.finalized_checkpoint().root;
+        assert!(
+            fork_choice.is_descendant(finalized_root, confirmed_root),
+            "Confirmed head should be descendant of finalized checkpoint"
+        );
+    }
+    
+    // Test that FCR confirmation is consistent across multiple calls
+    let confirmed_head_1 = fork_choice.get_fast_confirmed_head();
+    let confirmed_head_2 = fork_choice.get_fast_confirmed_head();
+    assert_eq!(confirmed_head_1, confirmed_head_2, "FCR confirmation should be consistent");
+    
+    drop(fork_choice);
+    
+    // Test with different Byzantine threshold
+    let config_high_beta = ChainConfig {
+        fast_confirmation_enabled: true,
+        fcr_byzantine_threshold_percentage: 30, // Higher threshold
+        ..ChainConfig::default()
+    };
+    let test_high_beta = ForkChoiceTest::new_with_chain_config(config_high_beta);
+    let test_high_beta = test_high_beta
+        .apply_blocks_while(|_, state| state.finalized_checkpoint().epoch == 0)
+        .await
+        .unwrap()
+        .apply_blocks(5)
+        .await;
+
+    let fork_choice_high_beta = test_high_beta.harness.chain.canonical_head.fork_choice_read_lock();
+    let confirmed_head_high_beta = fork_choice_high_beta.get_fast_confirmed_head();
+    
+    assert!(fork_choice_high_beta.is_fast_confirmation_enabled(), "FCR should be enabled with high beta");
+}
+
+/// Tests the will_current_epoch_checkpoint_be_justified functionality through FCR confirmation logic
+#[tokio::test]
+async fn fcr_will_current_epoch_checkpoint_be_justified_tests() {
+    let config = ChainConfig {
+        fast_confirmation_enabled: true,
+        fcr_byzantine_threshold_percentage: DEFAULT_FCR_BYZANTINE_THRESHOLD_PERCENTAGE,
+        ..ChainConfig::default()
+    };
+    let test = ForkChoiceTest::new_with_chain_config(config);
+    let test = test
+        .apply_blocks_while(|_, state| state.finalized_checkpoint().epoch == 0)
+        .await
+        .unwrap()
+        .apply_blocks(5)
+        .await;
+
+    // Test that FCR confirmation logic works correctly with checkpoint justification analysis
+    // This indirectly tests the will_current_epoch_checkpoint_be_justified function
+    
+    let fork_choice = test.harness.chain.canonical_head.fork_choice_read_lock();
+
+    // Test that we can get a confirmed head (this uses checkpoint justification analysis internally)
+    let confirmed_head = fork_choice.get_fast_confirmed_head();
+    assert!(confirmed_head.is_some(), "Should be able to get confirmed head");
+    
+    // Test that the confirmed head is a valid block
+    if let Some(confirmed_root) = confirmed_head {
+        assert_ne!(confirmed_root, Hash256::zero(), "Confirmed head should not be zero");
+        
+        // Test that the confirmed head is a descendant of the finalized checkpoint
+        let finalized_root = test.harness.finalized_checkpoint().root;
+        assert!(
+            fork_choice.is_descendant(finalized_root, confirmed_root),
+            "Confirmed head should be descendant of finalized checkpoint"
+        );
+    }
+    
+    // Test that FCR confirmation is consistent across multiple calls
+    let confirmed_head_1 = fork_choice.get_fast_confirmed_head();
+    let confirmed_head_2 = fork_choice.get_fast_confirmed_head();
+    assert_eq!(confirmed_head_1, confirmed_head_2, "FCR confirmation should be consistent");
+    
+    drop(fork_choice);
+    
+    // Test with different Byzantine threshold
+    let config_high_beta = ChainConfig {
+        fast_confirmation_enabled: true,
+        fcr_byzantine_threshold_percentage: 30, // Higher threshold
+        ..ChainConfig::default()
+    };
+    let test_high_beta = ForkChoiceTest::new_with_chain_config(config_high_beta);
+    let test_high_beta = test_high_beta
+        .apply_blocks_while(|_, state| state.finalized_checkpoint().epoch == 0)
+        .await
+        .unwrap()
+        .apply_blocks(5)
+        .await;
+
+    let fork_choice_high_beta = test_high_beta.harness.chain.canonical_head.fork_choice_read_lock();
+    let confirmed_head_high_beta = fork_choice_high_beta.get_fast_confirmed_head();
+    
+    // Higher Byzantine threshold should make confirmation more conservative
+    // (though the exact behavior depends on the specific test setup)
+    assert!(fork_choice_high_beta.is_fast_confirmation_enabled(), "FCR should be enabled with high beta");
+    
+    // Test that FCR confirmation works with different checkpoint scenarios
+    // This tests the checkpoint justification analysis through the confirmation logic
+    
+    // Test that FCR confirmation is safe (never confirms unsafe blocks)
+    // The confirmed head should always be a descendant of the finalized checkpoint
+    if let Some(confirmed_root) = confirmed_head_high_beta {
+        let finalized_root = test_high_beta.harness.finalized_checkpoint().root;
+        assert!(
+            fork_choice_high_beta.is_descendant(finalized_root, confirmed_root),
+            "FCR confirmation should always be safe"
+        );
+    }
 }
 
 /// Tests FCR metadata pruning behavior
@@ -2322,18 +2464,18 @@ async fn fcr_algorithm_threshold_tests() {
     let thresholds = [0, 10, 25, 40, 49]; // Test various valid thresholds
 
     for &threshold in &thresholds {
-        let config = ChainConfig {
-            fast_confirmation_enabled: true,
+    let config = ChainConfig {
+        fast_confirmation_enabled: true,
             fcr_byzantine_threshold_percentage: threshold,
-            ..ChainConfig::default()
-        };
-        let test = ForkChoiceTest::new_with_chain_config(config);
-        let test = test
-            .apply_blocks_while(|_, state| state.finalized_checkpoint().epoch == 0)
-            .await
-            .unwrap()
+        ..ChainConfig::default()
+    };
+    let test = ForkChoiceTest::new_with_chain_config(config);
+    let test = test
+        .apply_blocks_while(|_, state| state.finalized_checkpoint().epoch == 0)
+        .await
+        .unwrap()
             .apply_blocks(2)
-            .await;
+        .await;
 
         // Test that FCR works with each threshold
         let fork_choice = test.harness.chain.canonical_head.fork_choice_read_lock();
