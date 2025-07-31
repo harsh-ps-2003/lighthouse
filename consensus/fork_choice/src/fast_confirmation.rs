@@ -18,7 +18,7 @@ use proto_array::ProtoArrayForkChoice;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
-use types::{Checkpoint, Epoch, EthSpec, FixedBytesExtended, Hash256, Slot};
+use types::{BeaconState, Checkpoint, Epoch, EthSpec, FixedBytesExtended, Hash256, Slot};
 
 /// Default Byzantine threshold in percentage (25%)
 /// **Specification**: `CONFIRMATION_BYZANTINE_THRESHOLD = 33` (but we use 25% for single-slot confirmation)
@@ -26,6 +26,11 @@ pub const DEFAULT_FCR_BYZANTINE_THRESHOLD_PERCENTAGE: u64 = 25;
 /// Maximum depth to scan for reorgs (mainnet safety)
 /// **Specification**: Not in spec (Lighthouse safety limit)
 const MAX_REORG_DEPTH: usize = 32;
+/// Committee weight estimation adjustment factor for safety
+/// **Specification**: `COMMITTEE_WEIGHT_ESTIMATION_ADJUSTMENT_FACTOR = 5` (0.5%)
+/// **Why**: Adds a small safety margin to committee weight estimates to ensure
+/// FCR safety guarantees are maintained even with estimation errors
+const COMMITTEE_WEIGHT_ESTIMATION_ADJUSTMENT_FACTOR: u64 = 5;
 
 /// Configuration for the Fast Confirmation Rule.
 #[derive(Debug, Clone)]
@@ -1272,8 +1277,138 @@ impl<E: EthSpec> FastConfirmation<E> {
             };
 
             // Apply safety adjustment factor for partial epoch coverage
-            Ok(estimate * 1005 / 1000) // 0.5% safety margin
+            Ok(self.adjust_committee_weight_estimate_to_ensure_safety(estimate))
+            // 0.5% safety margin
         }
+    }
+
+    /// Adjusts committee weight estimates to ensure safety.
+    ///
+    /// **Python Specification**: `adjust_committee_weight_estimate_to_ensure_safety(estimate)`
+    ///
+    /// **Why Required**: Committee weight estimation can have small errors due to
+    /// cross-epoch calculations and validator set changes. This function adds a
+    /// small safety margin to ensure FCR safety guarantees are maintained even
+    /// with estimation errors.
+    ///
+    /// **Specification**: Multiplies the estimate by `(1000 + COMMITTEE_WEIGHT_ESTIMATION_ADJUSTMENT_FACTOR) / 1000`
+    /// to add a small safety margin (0.5% for the default factor of 5).
+    ///
+    /// # Arguments
+    /// * `estimate` - The raw committee weight estimate
+    ///
+    /// # Returns
+    /// * `u64` - The adjusted estimate with safety margin
+    fn adjust_committee_weight_estimate_to_ensure_safety(&self, estimate: u64) -> u64 {
+        // Apply safety adjustment: estimate * (1000 + adjustment_factor) / 1000
+        // This adds a small safety margin to ensure FCR safety guarantees
+        estimate * (1000 + COMMITTEE_WEIGHT_ESTIMATION_ADJUSTMENT_FACTOR) / 1000
+    }
+
+    /// Estimates FFG support for a checkpoint using LMD-GHOST votes.
+    ///
+    /// **Python Specification**: `get_checkpoint_weight(store, checkpoint, checkpoint_state)`
+    ///
+    /// **Why Required**: FCR needs to estimate FFG support for checkpoints to ensure
+    /// that confirmed blocks won't be filtered out by FFG justification changes.
+    /// This function provides a lower bound on FFG support by analyzing LMD-GHOST votes.
+    ///
+    /// **Specification**: Uses LMD-GHOST votes to estimate FFG support for a checkpoint.
+    /// A validator voting for a block implicitly supports all ancestor checkpoints.
+    ///
+    /// # Arguments
+    /// * `proto_array` - The proto array containing the block DAG
+    /// * `fc_store` - The fork choice store
+    /// * `checkpoint` - The checkpoint to estimate support for
+    /// * `checkpoint_state` - The state at the checkpoint
+    ///
+    /// # Returns
+    /// * `Result<u64, Error<T::Error>>` - Estimated FFG support weight
+    fn get_checkpoint_weight<T>(
+        &self,
+        proto_array: &ProtoArrayForkChoice,
+        fc_store: &T,
+        checkpoint: &Checkpoint,
+        checkpoint_state: &BeaconState<E>,
+    ) -> Result<u64, crate::Error<T::Error>>
+    where
+        T: crate::ForkChoiceStore<E>,
+    {
+        let current_slot = fc_store.get_current_slot();
+        let checkpoint_slot = Slot::new(checkpoint.epoch.as_u64() * E::slots_per_epoch());
+
+        // If checkpoint is in the future, no support yet
+        if current_slot <= checkpoint_slot {
+            return Ok(0);
+        }
+
+        let mut checkpoint_weight = 0u64;
+
+        // Get active validator indices from checkpoint state
+        let active_validator_indices = checkpoint_state
+            .get_active_validator_indices(checkpoint_state.current_epoch(), fc_store.chain_spec())
+            .map_err(|e| crate::Error::BeaconStateError(e))?;
+
+        // Iterate through all validators to check their votes
+        for validator_index in active_validator_indices {
+            // Skip slashed validators
+            if checkpoint_state
+                .validators()
+                .get(validator_index)
+                .map_or(false, |v| v.slashed)
+            {
+                continue;
+            }
+
+            // Get the latest message for this validator
+            if let Some((latest_root, latest_epoch)) = proto_array.latest_message(validator_index) {
+                // Check if this validator's vote supports the checkpoint
+                if self.validator_vote_supports_checkpoint(
+                    proto_array,
+                    latest_root,
+                    latest_epoch,
+                    checkpoint,
+                ) {
+                    // Add this validator's effective balance to the checkpoint weight
+                    if let Some(validator) = checkpoint_state.validators().get(validator_index) {
+                        checkpoint_weight += validator.effective_balance;
+                    }
+                }
+            }
+        }
+
+        Ok(checkpoint_weight)
+    }
+
+    /// Checks if a validator's vote supports a checkpoint.
+    ///
+    /// **Why Required**: This helper function determines whether a validator's
+    /// LMD-GHOST vote implicitly supports a given checkpoint. A validator voting
+    /// for a block supports all ancestor checkpoints of that block.
+    ///
+    /// # Arguments
+    /// * `proto_array` - The proto array containing the block DAG
+    /// * `vote_root` - The block root the validator voted for
+    /// * `vote_epoch` - The epoch of the validator's vote
+    /// * `checkpoint` - The checkpoint to check support for
+    ///
+    /// # Returns
+    /// * `bool` - True if the vote supports the checkpoint
+    fn validator_vote_supports_checkpoint(
+        &self,
+        proto_array: &ProtoArrayForkChoice,
+        vote_root: Hash256,
+        vote_epoch: Epoch,
+        checkpoint: &Checkpoint,
+    ) -> bool {
+        // If the vote is from a different epoch than the checkpoint, it doesn't support it
+        if vote_epoch != checkpoint.epoch {
+            return false;
+        }
+
+        // Check if the voted block is descended from the checkpoint block
+        // A validator voting for a descendant block implicitly supports the checkpoint
+        proto_array.is_descendant(checkpoint.root, vote_root)
     }
 
     /// Checks if the slot range covers a full validator set.
