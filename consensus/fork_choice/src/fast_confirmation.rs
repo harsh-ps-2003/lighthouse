@@ -6,21 +6,21 @@
 //!
 //! The FCR operates under network synchrony assumptions and uses LMD-GHOST vote weights
 //! combined with FFG checkpoint support to determine block permanence.
-//! 
+//!
 //! ARCHITECTURAL LIMITATION: Proper FFG analysis is not implemented due to architectural constraints.
 //! The ForkChoiceStore trait doesn't provide access to checkpoint states, which are required for
 //! the full FCR specification's FFG integration. The current implementation uses a simplified approach
 //! that prioritizes safety over completeness.
-//! 
+//!
 //! To implement full FFG analysis, the ForkChoiceStore trait would need to be extended with methods
 //! like `get_checkpoint_state(&self, checkpoint: &Checkpoint) -> Option<&BeaconState<E>>`.
-//! 
+//!
 //! This limitation affects the following FCR functions:
 //! - `get_checkpoint_weight()` - requires checkpoint_state parameter
 //! - `validator_vote_supports_checkpoint()` - used by get_checkpoint_weight
 //! - `get_ffg_weight_till_slot()` - requires total_active_balance from checkpoint state
 //! - `will_current_epoch_checkpoint_be_justified()` - requires full FFG analysis
-//! 
+//!
 //! The current implementation provides LMD-GHOST confirmation but lacks the complete FFG integration
 //! specified in the FCR Python specification.
 
@@ -32,9 +32,12 @@ use std::marker::PhantomData;
 use std::num::NonZeroUsize;
 use types::{Checkpoint, Epoch, EthSpec, FixedBytesExtended, Hash256, Slot};
 
-/// Default Byzantine threshold in percentage (25%)
-/// **Specification**: `CONFIRMATION_BYZANTINE_THRESHOLD = 33` (but we use 25% for single-slot confirmation)
-pub const DEFAULT_FCR_BYZANTINE_THRESHOLD_PERCENTAGE: u64 = 25;
+/// Default Byzantine threshold percentage for FCR
+/// **Python Specification**: `CONFIRMATION_BYZANTINE_THRESHOLD = 33`
+/// **Why**: This is the maximum fraction of Byzantine stake that FCR assumes
+/// can be controlled by an adversary. The 33% threshold provides a balance
+/// between confirmation speed and safety guarantees.
+pub const DEFAULT_FCR_BYZANTINE_THRESHOLD_PERCENTAGE: u64 = 33;
 /// Maximum depth to scan for reorgs (mainnet safety)
 /// **Specification**: Not in spec (Lighthouse safety limit)
 const MAX_REORG_DEPTH: usize = 32;
@@ -514,7 +517,7 @@ impl<E: EthSpec> FastConfirmation<E> {
             if let Some(block) = proto_array.get_block(&current_root) {
                 if let Some(parent_root) = block.parent_root {
                     current_root = parent_root;
-                depth += 1;
+                    depth += 1;
                 } else {
                     // Reached genesis block, stop scanning
                     break;
@@ -609,21 +612,23 @@ impl<E: EthSpec> FastConfirmation<E> {
         // Get proposer boost score separately (as required by FCR spec)
         let proposer_score =
             match proto_array.get_proposer_score::<E>(block_root, fc_store.chain_spec()) {
-            Some(score) => score,
-            None => 0, // No proposer boost applicable
-        };
+                Some(score) => score,
+                None => 0, // No proposer boost applicable
+            };
 
         // Calculate the Byzantine threshold
         let beta_threshold = self.config.beta_percentage;
 
-        // Apply the FCR formula: 2 * S > W * (1 + 2 * β / 100) + proposer_score
+        // Apply the FCR formula: 2 * S > W + W // 50 * CONFIRMATION_BYZANTINE_THRESHOLD + proposer_score
+        // **Python Specification**: 2 * support > maximum_support + maximum_support // 50 * CONFIRMATION_BYZANTINE_THRESHOLD + proposer_score
         // Using integer arithmetic to avoid floating point issues
         let left_side = 2 * support;
-        let right_side = committee_weight * (100 + 2 * beta_threshold) / 100 + proposer_score;
+        let right_side =
+            committee_weight + committee_weight / 50 * self.config.beta_percentage + proposer_score;
 
         // Check LMD-GHOST confirmation (Q-indicator)
         let lmd_confirmed = left_side > right_side;
-        
+
         if !lmd_confirmed {
             return Ok(false);
         }
@@ -631,9 +636,10 @@ impl<E: EthSpec> FastConfirmation<E> {
         // Check FFG confirmation (checkpoint justification)
         // Get the checkpoint for this block's epoch
         let block_epoch = block.slot.epoch(E::slots_per_epoch());
-        let checkpoint_root = self.get_checkpoint_block(proto_array, block_root, block_epoch)
+        let checkpoint_root = self
+            .get_checkpoint_block(proto_array, block_root, block_epoch)
             .unwrap_or(block_root); // Fallback to block root if no checkpoint block found
-        
+
         let checkpoint = Checkpoint {
             epoch: block_epoch,
             root: checkpoint_root,
@@ -643,7 +649,8 @@ impl<E: EthSpec> FastConfirmation<E> {
         // Note: In a real implementation, we'd need to get the actual checkpoint state
         // For now, we'll use a simplified approach that checks if the checkpoint
         // will be justified based on current vote patterns
-        let ffg_confirmed = self.will_checkpoint_be_justified(proto_array, fc_store, &checkpoint)?;
+        let ffg_confirmed =
+            self.will_checkpoint_be_justified(proto_array, fc_store, &checkpoint)?;
 
         Ok(lmd_confirmed && ffg_confirmed)
     }
@@ -1336,45 +1343,5 @@ impl<E: EthSpec> FastConfirmation<E> {
             (weight_per_slot / E::slots_per_epoch()) * slots_in_start_epoch * slots_in_end_epoch;
 
         Ok(start_epoch_weight + end_epoch_weight - cross_epoch_adjustment)
-    }
-
-    /// Gets a simplified committee weight between slots for basic FCR implementation.
-    ///
-    /// **Specification**: Simplified version of `get_committee_weight_between_slots()`
-    ///
-    /// **Why Required**: This is a basic implementation for the initial FCR integration.
-    /// The full committee weight calculation with cross-epoch handling will be implemented
-    /// later. This provides a working foundation that can be enhanced later.
-    ///
-    /// # Arguments
-    /// * `start_slot` - Starting slot for committee weight calculation
-    /// * `end_slot` - Ending slot for committee weight calculation
-    /// * `fc_store` - The fork choice store containing current state
-    ///
-    /// # Returns
-    /// * `Ok(u64)` - Committee weight between the slots
-    /// * `Err(Error)` - Error occurred during calculation
-    fn get_committee_weight_between_slots_simple<T>(
-        &self,
-        start_slot: Slot,
-        end_slot: Slot,
-        fc_store: &T,
-    ) -> Result<u64, crate::Error<T::Error>>
-    where
-        T: crate::ForkChoiceStore<E>,
-    {
-        if start_slot > end_slot {
-            return Ok(0);
-        }
-
-        // For now, use a simplified calculation based on total active balance
-        // This will be replaced with proper committee weight calculation in Week 9
-        let total_active_balance = fc_store.justified_balances().total_effective_balance;
-        
-        // Simple pro-rata calculation: assume equal distribution across slots
-        let slots_covered = end_slot - start_slot + 1;
-        let weight_per_slot = total_active_balance / E::slots_per_epoch();
-        
-        Ok(weight_per_slot * slots_covered.as_u64())
     }
 }
