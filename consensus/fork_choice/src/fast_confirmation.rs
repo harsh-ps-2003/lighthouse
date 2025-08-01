@@ -214,6 +214,9 @@ impl<E: EthSpec> FastConfirmation<E> {
     /// **Specification**: Returns true if `ancestor` is an ancestor of `root` in the block DAG.
     /// A block is considered an ancestor of itself.
     ///
+    /// **Implementation**: Uses the existing `is_descendant` method with swapped arguments,
+    /// following the same pattern as the fork choice's `is_ancestor` method.
+    ///
     /// # Arguments
     /// * `proto_array` - The proto array containing the block DAG
     /// * `root` - The descendant block root to check
@@ -232,42 +235,10 @@ impl<E: EthSpec> FastConfirmation<E> {
             return true;
         }
 
-        // Check if both blocks exist in the proto array
-        if proto_array.get_block(&root).is_none() {
-            return false; // Root doesn't exist
-        }
-
-        if proto_array.get_block(&ancestor).is_none() {
-            return false; // Ancestor doesn't exist
-        }
-
-        // Walk up the chain from root to find the ancestor
-        let mut current_root = root;
-        let mut depth = 0;
-        const MAX_ANCESTOR_DEPTH: usize = 1000; // Safety limit to prevent infinite loops
-
-        while depth < MAX_ANCESTOR_DEPTH {
-            let current_block = match proto_array.get_block(&current_root) {
-                Some(block) => block,
-                None => break, // Reached a block that doesn't exist
-            };
-
-            // Check if we've found the ancestor
-            if current_root == ancestor {
-                return true;
-            }
-
-            // Move to parent
-            if let Some(parent_root) = current_block.parent_root {
-                current_root = parent_root;
-                depth += 1;
-            } else {
-                // Reached genesis (no parent)
-                break;
-            }
-        }
-
-        false
+        // Use the existing is_descendant method with swapped arguments
+        // is_descendant(ancestor, root) checks if root is a descendant of ancestor
+        // which is equivalent to ancestor being an ancestor of root
+        proto_array.is_descendant(ancestor, root)
     }
 
     /// Checks if a block is confirmed by FCR.
