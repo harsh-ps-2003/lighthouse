@@ -23,8 +23,8 @@
 //!
 //! The current implementation provides LMD-GHOST confirmation but lacks the complete FFG integration
 //! specified in the FCR Python specification.
-use crate::ForkChoiceStore;
 use crate::Error::ProtoArrayStringError;
+use crate::ForkChoiceStore;
 use lru::LruCache;
 use proto_array::ProtoArrayForkChoice;
 use std::collections::HashMap;
