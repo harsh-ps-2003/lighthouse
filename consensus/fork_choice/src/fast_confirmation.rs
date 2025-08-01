@@ -587,15 +587,15 @@ impl<E: EthSpec> FastConfirmation<E> {
                 None => 0, // No proposer boost applicable
             };
 
-        // Calculate the Byzantine threshold
+        // Calculate the Byzantine threshold and current epoch for FCR logic
         let beta_threshold = self.config.beta_percentage;
+        let current_epoch = fc_store.get_current_slot().epoch(E::slots_per_epoch());
 
         // Apply the FCR formula: 2 * S > W + W // 50 * CONFIRMATION_BYZANTINE_THRESHOLD + proposer_score
         // **Python Specification**: 2 * support > maximum_support + maximum_support // 50 * CONFIRMATION_BYZANTINE_THRESHOLD + proposer_score
         // Using integer arithmetic to avoid floating point issues
         let left_side = 2 * support;
-        let right_side =
-            committee_weight + committee_weight / 50 * self.config.beta_percentage + proposer_score;
+        let right_side = committee_weight + committee_weight / 50 * beta_threshold + proposer_score;
 
         // Check LMD-GHOST confirmation (Q-indicator)
         let lmd_confirmed = left_side > right_side;
@@ -607,6 +607,13 @@ impl<E: EthSpec> FastConfirmation<E> {
         // Check FFG confirmation (checkpoint justification)
         // Get the checkpoint for this block's epoch
         let block_epoch = block.slot.epoch(E::slots_per_epoch());
+
+        // Use current_epoch for epoch boundary checks
+        if block_epoch > current_epoch {
+            // Block is from a future epoch, cannot be confirmed yet
+            return Ok(false);
+        }
+
         let checkpoint_root = self
             .get_checkpoint_block(proto_array, block_root, block_epoch)
             .unwrap_or(block_root); // Fallback to block root if no checkpoint block found
@@ -909,7 +916,6 @@ impl<E: EthSpec> FastConfirmation<E> {
     where
         T: ForkChoiceStore<E>,
     {
-        let current_epoch = fc_store.get_current_slot().epoch(E::slots_per_epoch());
         let mut tentative_confirmed = confirmed_root;
 
         // Get canonical chain from confirmed root to head

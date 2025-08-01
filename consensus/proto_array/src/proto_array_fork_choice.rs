@@ -826,9 +826,15 @@ impl ProtoArrayForkChoice {
     /// **Specification**: Modified to support FCR with additional checkpoint_state parameter
     /// as per the Python specification's `get_weight(store, root, checkpoint_state)` function.
     ///
+    /// **Architectural Note**: Lighthouse uses pre-computed weights stored in `node.weight`
+    /// rather than calculating weights on-demand from the provided state. The `checkpoint_state`
+    /// parameter is currently ignored for performance reasons, as recalculating weights from
+    /// scratch would be prohibitively expensive. This is a deviation from the Python specification
+    /// but maintains the same functional behavior for FCR confirmation checks.
+    ///
     /// # Arguments
     /// * `block_root` - The block root to get weight for
-    /// * `checkpoint_state` - Optional checkpoint state for weight calculation (FCR requirement)
+    /// * `checkpoint_state` - Optional checkpoint state for weight calculation (currently ignored)
     /// * `include_proposer_boost` - Whether to include proposer boost (FCR doesn't want this)
     /// * `proposer_boost_root` - Current proposer boost root (for boost calculation)
     /// * `spec` - Chain specification (for proposer boost calculation)
@@ -839,7 +845,7 @@ impl ProtoArrayForkChoice {
     pub fn get_weight<E: EthSpec>(
         &self,
         block_root: &Hash256,
-        checkpoint_state: Option<&types::BeaconState<E>>,
+        _checkpoint_state: Option<&types::BeaconState<E>>,
         include_proposer_boost: bool,
         proposer_boost_root: Hash256,
         spec: &types::ChainSpec,

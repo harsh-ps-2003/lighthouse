@@ -12,7 +12,7 @@ use fork_choice::{
 };
 
 use fork_choice::fast_confirmation::DEFAULT_FCR_BYZANTINE_THRESHOLD_PERCENTAGE;
-use fork_choice::{FastConfirmationConfig, FcrMeta};
+use fork_choice::ForkChoice;
 use state_processing::state_advance::complete_state_advance;
 use std::fmt;
 use std::sync::Mutex;
@@ -1548,10 +1548,7 @@ async fn fcr_committee_weight_calculation_tests() {
         "Invalid slot range for testing"
     );
 
-    // Zero slot range
-    let zero_start = current_slot;
-    let zero_end = current_slot;
-    // Should return weight for exactly one slot
+    // Zero slot range - should return weight for exactly one slot
 }
 
 /// Tests confirmation inheritance logic
@@ -1912,25 +1909,16 @@ async fn fcr_adjust_committee_weight_estimate_tests() {
         .apply_blocks(3)
         .await;
 
-    let fork_choice = test.harness.chain.canonical_head.fork_choice_read_lock();
-
     // Test 1: Basic safety adjustment
     // The adjustment factor is 5, so estimate * (1000 + 5) / 1000 = estimate * 1.005
     let test_estimates = vec![1000, 10000, 100000, 1000000];
 
     for estimate in test_estimates {
-        let expected_adjusted = estimate * 1005 / 1000; // 0.5% increase
-
         // Test that the adjustment is applied correctly
         // Note: We can't directly test the private method, but we can test it indirectly
         // through the committee weight calculation that uses it
 
         // The committee weight calculation should apply this adjustment for cross-epoch estimates
-        let current_slot = test.harness.chain.slot().unwrap();
-        let start_slot = current_slot - 10;
-        let end_slot = current_slot - 1;
-
-        // This should trigger the cross-epoch calculation which uses the safety adjustment
         // Note: get_committee_weight_between_slots is a private method in FastConfirmation
         // We test it indirectly through the FCR confirmation logic
         // The actual committee weight calculation is tested in fcr_committee_weight_calculation_tests
@@ -1995,20 +1983,11 @@ async fn fcr_get_checkpoint_weight_tests() {
     let current_slot = test.harness.chain.slot().unwrap();
     let current_epoch = current_slot.epoch(E::slots_per_epoch());
     let future_epoch = current_epoch + 2;
-    let future_checkpoint = Checkpoint {
-        epoch: future_epoch,
-        root: Hash256::from_low_u64_be(999999), // Dummy root
-    };
 
     // We can't directly test the private method, but we can test the behavior
     // through the public API that uses it
 
     // Test 2: Current epoch checkpoint should have some weight
-    let current_epoch_checkpoint = Checkpoint {
-        epoch: current_epoch,
-        root: test.harness.head_block_root(),
-    };
-
     // The checkpoint weight should be related to the total active balance
     let total_active_balance = test
         .harness
@@ -2043,12 +2022,6 @@ async fn fcr_get_checkpoint_weight_tests() {
         .slot()
         .epoch(E::slots_per_epoch());
 
-    // Create a checkpoint for the head block's epoch
-    let head_checkpoint = Checkpoint {
-        epoch: head_epoch,
-        root: head_root,
-    };
-
     // The checkpoint weight should be related to the number of validators
     // who have voted for blocks descended from the checkpoint
 
@@ -2075,16 +2048,6 @@ async fn fcr_get_checkpoint_weight_tests() {
     }
 
     if let Some(ancestor_root) = ancestor_block {
-        let ancestor_epoch = proto_array
-            .get_block(&ancestor_root)
-            .unwrap()
-            .slot
-            .epoch(E::slots_per_epoch());
-        let ancestor_checkpoint = Checkpoint {
-            epoch: ancestor_epoch,
-            root: ancestor_root,
-        };
-
         // Validators voting for the head should support the ancestor checkpoint
         // This is tested through the FCR confirmation logic
 
@@ -2271,7 +2234,6 @@ async fn fcr_will_current_epoch_checkpoint_be_justified_tests() {
         .chain
         .canonical_head
         .fork_choice_read_lock();
-    let confirmed_head_high_beta = fork_choice_high_beta.get_fast_confirmed_head();
 
     // Higher Byzantine threshold should make confirmation more conservative
     // (though the exact behavior depends on the specific test setup)
@@ -2285,7 +2247,7 @@ async fn fcr_will_current_epoch_checkpoint_be_justified_tests() {
 
     // Test that FCR confirmation is safe (never confirms unsafe blocks)
     // The confirmed head should always be a descendant of the finalized checkpoint
-    if let Some(confirmed_root) = confirmed_head_high_beta {
+    if let Some(confirmed_root) = fork_choice_high_beta.get_fast_confirmed_head() {
         let finalized_root = test_high_beta.harness.finalized_checkpoint().root;
         assert!(
             fork_choice_high_beta.is_descendant(finalized_root, confirmed_root),
@@ -2424,8 +2386,6 @@ async fn fcr_cross_epoch_weight_edge_cases() {
 
     // Safety adjustment factor application
     // The cross-epoch calculation should apply the 0.5% safety margin
-    let fork_choice = test.harness.chain.canonical_head.fork_choice_read_lock();
-
     // Verify that the safety adjustment is applied correctly
     // This is tested indirectly through the committee weight calculation
 }
