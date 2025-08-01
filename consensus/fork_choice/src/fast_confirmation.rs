@@ -23,7 +23,7 @@
 //!
 //! The current implementation provides LMD-GHOST confirmation but lacks the complete FFG integration
 //! specified in the FCR Python specification.
-
+use crate::ForkChoiceStore;
 use crate::Error::ProtoArrayStringError;
 use lru::LruCache;
 use proto_array::ProtoArrayForkChoice;
@@ -286,7 +286,7 @@ impl<E: EthSpec> FastConfirmation<E> {
         head_root: Hash256,
     ) -> Result<(), crate::Error<T::Error>>
     where
-        T: crate::ForkChoiceStore<E>,
+        T: ForkChoiceStore<E>,
     {
         // Update the confirmed root to the latest confirmed block
         if let Some(new_confirmed_root) =
@@ -336,7 +336,7 @@ impl<E: EthSpec> FastConfirmation<E> {
         head_root: Hash256,
     ) -> Result<(), crate::Error<T::Error>>
     where
-        T: crate::ForkChoiceStore<E>,
+        T: ForkChoiceStore<E>,
     {
         // Call the main update method
         self.update_per_slot(proto_array, fc_store, head_root)
@@ -370,7 +370,7 @@ impl<E: EthSpec> FastConfirmation<E> {
         forkchoice_params: &crate::ForkchoiceUpdateParameters,
     ) -> Result<(), crate::Error<T::Error>>
     where
-        T: crate::ForkChoiceStore<E>,
+        T: ForkChoiceStore<E>,
     {
         let head_root = forkchoice_params.head_root;
         self.on_new_slot(proto_array, fc_store, head_root)
@@ -399,7 +399,7 @@ impl<E: EthSpec> FastConfirmation<E> {
         head_root: Hash256,
     ) -> Option<Hash256>
     where
-        T: crate::ForkChoiceStore<E>,
+        T: ForkChoiceStore<E>,
     {
         let mut confirmed_root = self.fcr_store.confirmed_root;
         let current_epoch = fc_store.get_current_slot().epoch(E::slots_per_epoch());
@@ -461,7 +461,7 @@ impl<E: EthSpec> FastConfirmation<E> {
         fc_store: &T,
     ) -> Result<(), crate::Error<T::Error>>
     where
-        T: crate::ForkChoiceStore<E>,
+        T: ForkChoiceStore<E>,
     {
         // Perform reverse ancestor scan from head_root to check for confirmations
         // This is the O(depth) operation that leverages the already-computed head
@@ -525,7 +525,7 @@ impl<E: EthSpec> FastConfirmation<E> {
         fc_store: &T,
     ) -> Result<bool, crate::Error<T::Error>>
     where
-        T: crate::ForkChoiceStore<E>,
+        T: ForkChoiceStore<E>,
     {
         // Get the block to check
         let block = match proto_array.get_block(&block_root) {
@@ -742,7 +742,7 @@ impl<E: EthSpec> FastConfirmation<E> {
         head_root: Hash256,
     ) -> Option<Hash256>
     where
-        T: crate::ForkChoiceStore<E>,
+        T: ForkChoiceStore<E>,
     {
         let current_epoch = fc_store.get_current_slot().epoch(E::slots_per_epoch());
         let mut confirmed_root = confirmed_root;
@@ -803,7 +803,7 @@ impl<E: EthSpec> FastConfirmation<E> {
         _head_root: Hash256,
     ) -> Result<bool, crate::Error<T::Error>>
     where
-        T: crate::ForkChoiceStore<E>,
+        T: ForkChoiceStore<E>,
     {
         // Simplified implementation: always return true
         // This allows confirmation to proceed based on LMD-GHOST support only
@@ -821,7 +821,7 @@ impl<E: EthSpec> FastConfirmation<E> {
         _head_root: Hash256,
     ) -> Result<bool, crate::Error<T::Error>>
     where
-        T: crate::ForkChoiceStore<E>,
+        T: ForkChoiceStore<E>,
     {
         // Simplified implementation: always return true
         // This allows confirmation to proceed based on LMD-GHOST support only
@@ -849,7 +849,7 @@ impl<E: EthSpec> FastConfirmation<E> {
         head_root: Hash256,
     ) -> Option<Hash256>
     where
-        T: crate::ForkChoiceStore<E>,
+        T: ForkChoiceStore<E>,
     {
         let current_epoch = fc_store.get_current_slot().epoch(E::slots_per_epoch());
         let mut current_confirmed = confirmed_root;
@@ -907,7 +907,7 @@ impl<E: EthSpec> FastConfirmation<E> {
         head_root: Hash256,
     ) -> Option<Hash256>
     where
-        T: crate::ForkChoiceStore<E>,
+        T: ForkChoiceStore<E>,
     {
         let current_epoch = fc_store.get_current_slot().epoch(E::slots_per_epoch());
         let mut tentative_confirmed = confirmed_root;
@@ -1058,7 +1058,7 @@ impl<E: EthSpec> FastConfirmation<E> {
         _checkpoint: &Checkpoint,
     ) -> Result<bool, crate::Error<T::Error>>
     where
-        T: crate::ForkChoiceStore<E>,
+        T: ForkChoiceStore<E>,
     {
         // Simplified implementation: always return true
         // This allows confirmation to proceed based on LMD-GHOST support only
@@ -1076,7 +1076,7 @@ impl<E: EthSpec> FastConfirmation<E> {
         _head_root: Hash256,
     ) -> Result<bool, crate::Error<T::Error>>
     where
-        T: crate::ForkChoiceStore<E>,
+        T: ForkChoiceStore<E>,
     {
         // Simplified implementation: always return true
         // This allows confirmation to proceed based on LMD-GHOST support only
@@ -1095,7 +1095,7 @@ impl<E: EthSpec> FastConfirmation<E> {
         _head_root: Hash256,
     ) -> Result<bool, crate::Error<T::Error>>
     where
-        T: crate::ForkChoiceStore<E>,
+        T: ForkChoiceStore<E>,
     {
         // Simplified implementation: always return true
         // This allows confirmation to proceed based on LMD-GHOST support only
@@ -1124,7 +1124,7 @@ impl<E: EthSpec> FastConfirmation<E> {
         proto_array: &ProtoArrayForkChoice,
     ) -> Result<(), crate::Error<T::Error>>
     where
-        T: crate::ForkChoiceStore<E>,
+        T: ForkChoiceStore<E>,
     {
         // Get the finalized block to determine the pruning boundary
         let finalized_block = match proto_array.get_block(&finalized_root) {
@@ -1184,7 +1184,7 @@ impl<E: EthSpec> FastConfirmation<E> {
         fc_store: &T,
     ) -> Result<u64, crate::Error<T::Error>>
     where
-        T: crate::ForkChoiceStore<E>,
+        T: ForkChoiceStore<E>,
     {
         if start_slot > end_slot {
             return Ok(0);
