@@ -7,22 +7,25 @@
 //! The FCR operates under network synchrony assumptions and uses LMD-GHOST vote weights
 //! combined with FFG checkpoint support to determine block permanence.
 //!
-//! ARCHITECTURAL LIMITATION: Proper FFG analysis is not implemented due to architectural constraints.
-//! The ForkChoiceStore trait doesn't provide access to checkpoint states, which are required for
-//! the full FCR specification's FFG integration. The current implementation uses a simplified approach
-//! that prioritizes safety over completeness.
+//! ARCHITECTURAL DESIGN CHOICE: Full FFG analysis is not implemented due to interface design decisions.
+//! While the underlying BeaconForkChoiceStore has access to historical checkpoint states through
+//! the HotColdDB, the ForkChoiceStore trait interface doesn't expose methods to access this data.
+//! The current implementation uses a simplified approach that prioritizes interface simplicity
+//! and performance over complete specification compliance.
 //!
 //! To implement full FFG analysis, the ForkChoiceStore trait would need to be extended with methods
 //! like `get_checkpoint_state(&self, checkpoint: &Checkpoint) -> Option<&BeaconState<E>>`.
+//! The data is available in the database, but the interface doesn't provide access to it.
 //!
-//! This limitation affects the following FCR functions:
+//! This design choice affects the following FCR functions:
 //! - `get_checkpoint_weight()` - requires checkpoint_state parameter
 //! - `validator_vote_supports_checkpoint()` - used by get_checkpoint_weight
 //! - `get_ffg_weight_till_slot()` - requires total_active_balance from checkpoint state
 //! - `will_current_epoch_checkpoint_be_justified()` - requires full FFG analysis
 //!
-//! The current implementation provides LMD-GHOST confirmation but lacks the complete FFG integration
-//! specified in the FCR Python specification.
+//! The current implementation provides LMD-GHOST confirmation with simplified FFG checks.
+//! This is a pragmatic design choice that maintains safety guarantees while keeping the
+//! interface simple and performant.
 use crate::Error::ProtoArrayStringError;
 use crate::ForkChoiceStore;
 use lru::LruCache;

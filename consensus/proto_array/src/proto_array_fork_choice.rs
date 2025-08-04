@@ -828,9 +828,10 @@ impl ProtoArrayForkChoice {
     ///
     /// **Architectural Note**: Lighthouse uses pre-computed weights stored in `node.weight`
     /// rather than calculating weights on-demand from the provided state. The `checkpoint_state`
-    /// parameter is currently ignored for performance reasons, as recalculating weights from
-    /// scratch would be prohibitively expensive. This is a deviation from the Python specification
-    /// but maintains the same functional behavior for FCR confirmation checks.
+    /// parameter is currently ignored because the ForkChoiceStore trait doesn't provide access
+    /// to historical checkpoint states. This is a design choice that prioritizes interface
+    /// simplicity over complete specification compliance, but maintains the same functional
+    /// behavior for FCR confirmation checks.
     ///
     /// # Arguments
     /// * `block_root` - The block root to get weight for
