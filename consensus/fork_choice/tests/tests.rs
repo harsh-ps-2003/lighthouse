@@ -12,7 +12,7 @@ use fork_choice::{
 };
 
 use fork_choice::fast_confirmation::DEFAULT_FCR_BYZANTINE_THRESHOLD_PERCENTAGE;
-use fork_choice::ForkChoice;
+
 use state_processing::state_advance::complete_state_advance;
 use std::fmt;
 use std::sync::Mutex;
@@ -1499,7 +1499,6 @@ async fn fcr_committee_weight_calculation_tests() {
         .await;
 
     // Same epoch committee weight calculation
-    let fork_choice = test.harness.chain.canonical_head.fork_choice_read_lock();
 
     let current_slot = test.harness.get_current_slot();
     // Use slots within the same epoch for this test
@@ -1913,16 +1912,14 @@ async fn fcr_adjust_committee_weight_estimate_tests() {
     // The adjustment factor is 5, so estimate * (1000 + 5) / 1000 = estimate * 1.005
     let test_estimates = vec![1000, 10000, 100000, 1000000];
 
-    for estimate in test_estimates {
-        // Test that the adjustment is applied correctly
-        // Note: We can't directly test the private method, but we can test it indirectly
-        // through the committee weight calculation that uses it
+    // Test that the adjustment is applied correctly
+    // Note: We can't directly test the private method, but we can test it indirectly
+    // through the committee weight calculation that uses it
 
-        // The committee weight calculation should apply this adjustment for cross-epoch estimates
-        // Note: get_committee_weight_between_slots is a private method in FastConfirmation
-        // We test it indirectly through the FCR confirmation logic
-        // The actual committee weight calculation is tested in fcr_committee_weight_calculation_tests
-    }
+    // The committee weight calculation should apply this adjustment for cross-epoch estimates
+    // Note: get_committee_weight_between_slots is a private method in FastConfirmation
+    // We test it indirectly through the FCR confirmation logic
+    // The actual committee weight calculation is tested in fcr_committee_weight_calculation_tests
 
     // Test 2: Edge cases
     // Zero estimate should remain zero
@@ -1982,28 +1979,15 @@ async fn fcr_get_checkpoint_weight_tests() {
     // Test 1: Future checkpoint should have zero weight
     let current_slot = test.harness.chain.slot().unwrap();
     let current_epoch = current_slot.epoch(E::slots_per_epoch());
-    let future_epoch = current_epoch + 2;
 
     // We can't directly test the private method, but we can test the behavior
     // through the public API that uses it
 
     // Test 2: Current epoch checkpoint should have some weight
     // The checkpoint weight should be related to the total active balance
-    let total_active_balance = test
-        .harness
-        .chain
-        .head()
-        .snapshot
-        .beacon_state
-        .get_total_active_balance()
-        .expect("Should be able to get total active balance");
 
     // Test 3: Past epoch checkpoint should have weight
     let past_epoch = current_epoch - 1;
-    let past_checkpoint = Checkpoint {
-        epoch: past_epoch,
-        root: test.harness.finalized_checkpoint().root,
-    };
 
     // Test 4: Checkpoint weight should be consistent with validator votes
     // This is tested indirectly through the FCR confirmation logic
@@ -2013,14 +1997,6 @@ async fn fcr_get_checkpoint_weight_tests() {
 
     // Test 6: All validators voting for the same block should support its checkpoint
     let head_root = test.harness.head_block_root();
-    let head_epoch = test
-        .harness
-        .chain
-        .head()
-        .snapshot
-        .beacon_block
-        .slot()
-        .epoch(E::slots_per_epoch());
 
     // The checkpoint weight should be related to the number of validators
     // who have voted for blocks descended from the checkpoint
@@ -2047,19 +2023,17 @@ async fn fcr_get_checkpoint_weight_tests() {
         }
     }
 
-    if let Some(ancestor_root) = ancestor_block {
-        // Validators voting for the head should support the ancestor checkpoint
-        // This is tested through the FCR confirmation logic
+    // Validators voting for the head should support the ancestor checkpoint
+    // This is tested through the FCR confirmation logic
 
-        // Test 8: Different epoch votes don't support checkpoint
-        // A validator voting for a block in epoch N doesn't support a checkpoint in epoch M
+    // Test 8: Different epoch votes don't support checkpoint
+    // A validator voting for a block in epoch N doesn't support a checkpoint in epoch M
 
-        // Test 9: Non-descendant votes don't support checkpoint
-        // A validator voting for a block that's not descended from the checkpoint
-        // doesn't support that checkpoint
+    // Test 9: Non-descendant votes don't support checkpoint
+    // A validator voting for a block that's not descended from the checkpoint
+    // doesn't support that checkpoint
 
-        // These are tested through the FCR confirmation logic and validator vote analysis
-    }
+    // These are tested through the FCR confirmation logic and validator vote analysis
 
     // Test 10: Slashed validators don't contribute to checkpoint weight
     // This would require a test setup with slashed validators
@@ -2153,7 +2127,6 @@ async fn fcr_get_ffg_weight_till_slot_tests() {
         .chain
         .canonical_head
         .fork_choice_read_lock();
-    let confirmed_head_high_beta = fork_choice_high_beta.get_fast_confirmed_head();
 
     assert!(
         fork_choice_high_beta.is_fast_confirmation_enabled(),
@@ -2293,7 +2266,7 @@ async fn fcr_pruning_behavior_tests() {
     let test = test.apply_blocks(1).await;
 
     // Pruning with new finalization
-    let new_finalized_root = test.harness.finalized_checkpoint().root;
+
     // Note: Finalization may not advance with just one block, which is normal behavior
     // The test verifies that pruning logic works regardless of finalization advancement
 
@@ -2301,7 +2274,7 @@ async fn fcr_pruning_behavior_tests() {
     let new_fork_choice = test.harness.chain.canonical_head.fork_choice_read_lock();
 
     // Old finalized block should no longer exist in fork choice
-    let old_block_exists = new_fork_choice.get_block(&finalized_root);
+
     // Note: This might still exist depending on pruning implementation
     // The key is that FCR metadata should be consistent with fork choice state
     drop(new_fork_choice);
@@ -2531,10 +2504,7 @@ async fn fcr_ffg_confirmation_across_epoch_boundary() {
     let confirmed_block = proto
         .get_block(&confirmed_root)
         .expect("confirmed block must exist");
-    let confirmed_epoch = confirmed_block
-        .slot
-        .expect("slot set on proto node")
-        .epoch(E::slots_per_epoch());
+    let confirmed_epoch = confirmed_block.slot.epoch(E::slots_per_epoch());
 
     // Without attestations crossing the boundary, FFG support is scarce: remain in prev epoch.
     assert!(
@@ -2569,10 +2539,7 @@ async fn fcr_ffg_confirmation_across_epoch_boundary() {
     let confirmed_block2 = proto2
         .get_block(&confirmed_root2)
         .expect("confirmed block must exist");
-    let confirmed_epoch2 = confirmed_block2
-        .slot
-        .expect("slot set on proto node")
-        .epoch(E::slots_per_epoch());
+    let confirmed_epoch2 = confirmed_block2.slot.epoch(E::slots_per_epoch());
     let current_epoch2 = with_attn
         .harness
         .get_current_slot()
@@ -2649,7 +2616,7 @@ async fn fcr_ffg_beta_sensitivity() {
     let ep_hb = fc_hb
         .proto_array()
         .get_block(&chb)
-        .and_then(|n| n.slot)
+        .and_then(|n| Some(n.slot))
         .expect("slot")
         .epoch(E::slots_per_epoch());
     // With very high β, expect confirmation biased to previous epoch.
@@ -2678,7 +2645,7 @@ async fn fcr_ffg_beta_sensitivity() {
     let ep_lb = fc_lb
         .proto_array()
         .get_block(&clb)
-        .and_then(|n| n.slot)
+        .and_then(|n| Some(n.slot))
         .expect("slot")
         .epoch(E::slots_per_epoch());
     // With lower β, allow confirmation at the boundary/current epoch.
@@ -2710,7 +2677,7 @@ async fn fcr_ffg_boundary_slot_conservative_then_progress() {
     let ep1 = fc1
         .proto_array()
         .get_block(&c1)
-        .and_then(|n| n.slot)
+        .and_then(|n| Some(n.slot))
         .expect("slot")
         .epoch(E::slots_per_epoch());
     assert!(
@@ -2727,7 +2694,7 @@ async fn fcr_ffg_boundary_slot_conservative_then_progress() {
     let ep2 = fc2
         .proto_array()
         .get_block(&c2)
-        .and_then(|n| n.slot)
+        .and_then(|n| Some(n.slot))
         .expect("slot")
         .epoch(E::slots_per_epoch());
     assert!(
