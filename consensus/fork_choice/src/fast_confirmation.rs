@@ -324,9 +324,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     /// # Returns
     /// * `bool` - True if the block is confirmed, false otherwise
     pub fn is_block_confirmed(&self, block_root: &Hash256) -> bool {
-        self.meta
-            .get(block_root)
-            .is_some_and(|meta| meta.confirmed)
+        self.meta.get(block_root).is_some_and(|meta| meta.confirmed)
     }
 
     /// Updates FCR state when transitioning to a new slot.
@@ -646,8 +644,9 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         )?;
 
         // Get proposer boost score separately (as required by FCR spec)
-        let proposer_score =
-            proto_array.get_proposer_score::<E>(block_root, fc_store.chain_spec()).unwrap_or_default();
+        let proposer_score = proto_array
+            .get_proposer_score::<E>(block_root, fc_store.chain_spec())
+            .unwrap_or_default();
 
         // Calculate the Byzantine threshold and current epoch for FCR logic
         let beta_threshold = self.config.beta_percentage;
@@ -814,7 +813,9 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         let mut confirmed_root = confirmed_root;
 
         // Get the confirmed block to check its epoch
-        let Some(confirmed_block) = proto_array.get_block(&confirmed_root) else { return None };
+        let Some(confirmed_block) = proto_array.get_block(&confirmed_root) else {
+            return None;
+        };
 
         let confirmed_block_epoch = confirmed_block.slot.epoch(E::slots_per_epoch());
 
@@ -1150,7 +1151,9 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         const MAX_DEPTH: usize = 1000; // Safety limit
 
         while depth < MAX_DEPTH {
-            let Some(current_block) = proto_array.get_block(&current_root) else { break };
+            let Some(current_block) = proto_array.get_block(&current_root) else {
+                break;
+            };
 
             let current_epoch = current_block.slot.epoch(E::slots_per_epoch());
             if current_epoch == epoch {
@@ -1290,7 +1293,6 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     /// # Returns
     /// * `Ok(u64)` - The checkpoint weight in Gwei
     /// * `Err(Error)` - Error occurred during calculation
-
 
     /// Gets the checkpoint weight for FFG analysis using a provided checkpoint state.
     ///
