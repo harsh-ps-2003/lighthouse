@@ -14,4 +14,7 @@ pub use proto_array::{
     Block as ProtoBlock, ExecutionStatus, InvalidationOperation, ProposerHeadError,
 };
 
-pub use crate::fast_confirmation::{FastConfirmation, FastConfirmationConfig, FcrMeta};
+pub use crate::fast_confirmation::{
+    FastConfirmation, FastConfirmationConfig, FcrMeta, StateProvider,
+    DEFAULT_FCR_BYZANTINE_THRESHOLD_PERCENTAGE, DEFAULT_FCR_SLASHING_THRESHOLD_PERCENTAGE,
+};

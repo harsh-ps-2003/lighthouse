@@ -1,5 +1,6 @@
 use crate::fast_confirmation::{
-    FastConfirmation, FastConfirmationConfig, DEFAULT_FCR_BYZANTINE_THRESHOLD_PERCENTAGE,
+    FastConfirmation, FastConfirmationConfig, StateProvider,
+    DEFAULT_FCR_BYZANTINE_THRESHOLD_PERCENTAGE,
 };
 use crate::metrics::{self, scrape_for_metrics};
 use crate::{ForkChoiceStore, InvalidationOperation};
@@ -312,10 +313,11 @@ pub struct ForkChoiceView {
 ///
 /// - Management of the justified state and caching of balances.
 /// - Queuing of attestations from the current slot.
-pub struct ForkChoice<T, E>
+pub struct ForkChoice<T, E, S>
 where
     T: ForkChoiceStore<E>,
     E: EthSpec,
+    S: StateProvider<E>,
 {
     /// Storage for `ForkChoice`, modelled off the spec `Store` object.
     fc_store: T,
@@ -327,15 +329,16 @@ where
     forkchoice_update_parameters: ForkchoiceUpdateParameters,
 
     /// Fast Confirmation Rule
-    fast_confirmation: Option<FastConfirmation<E>>,
+    fast_confirmation: Option<FastConfirmation<E, S>>,
 
     _phantom: PhantomData<E>,
 }
 
-impl<T, E> PartialEq for ForkChoice<T, E>
+impl<T, E, S> PartialEq for ForkChoice<T, E, S>
 where
     T: ForkChoiceStore<E> + PartialEq,
     E: EthSpec,
+    S: StateProvider<E>,
 {
     fn eq(&self, other: &Self) -> bool {
         self.fc_store == other.fc_store
@@ -344,10 +347,11 @@ where
     }
 }
 
-impl<T, E> ForkChoice<T, E>
+impl<T, E, S> ForkChoice<T, E, S>
 where
     T: ForkChoiceStore<E>,
     E: EthSpec,
+    S: StateProvider<E>,
 {
     /// Instantiates `Self` from an anchor (genesis or another finalized checkpoint).
     pub fn from_anchor(
@@ -358,6 +362,7 @@ where
         current_slot: Option<Slot>,
         fcr_enabled: bool,
         fcr_threshold: Option<u64>,
+        state_provider: S,
         spec: &ChainSpec,
     ) -> Result<Self, Error<T::Error>> {
         // Sanity check: the anchor must lie on an epoch boundary.
@@ -424,9 +429,10 @@ where
                 // If no custom threshold was supplied, fall back to the default configured value.
                 let threshold_pct =
                     fcr_threshold.unwrap_or(DEFAULT_FCR_BYZANTINE_THRESHOLD_PERCENTAGE);
-                Some(FastConfirmation::new(FastConfirmationConfig::new(
-                    threshold_pct,
-                )?))
+                Some(FastConfirmation::new(
+                    FastConfirmationConfig::new(threshold_pct)?,
+                    state_provider,
+                ))
             } else {
                 None
             },
@@ -1479,6 +1485,7 @@ where
         // Add FCR parameters directly
         fcr_enabled: bool,
         fcr_threshold: Option<u64>,
+        state_provider: S,
         spec: &ChainSpec,
     ) -> Result<Self, Error<T::Error>> {
         let proto_array =
@@ -1502,9 +1509,10 @@ where
                 // If no custom threshold was supplied, fall back to the default configured value.
                 let threshold_pct =
                     fcr_threshold.unwrap_or(DEFAULT_FCR_BYZANTINE_THRESHOLD_PERCENTAGE);
-                Some(FastConfirmation::new(FastConfirmationConfig::new(
-                    threshold_pct,
-                )?))
+                Some(FastConfirmation::new(
+                    FastConfirmationConfig::new(threshold_pct)?,
+                    state_provider,
+                ))
             } else {
                 None
             },

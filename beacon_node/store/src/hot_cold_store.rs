@@ -18,6 +18,7 @@ use crate::{
     parse_data_column_key, BlobSidecarListFromRoot, DBColumn, DatabaseBlock, Error, ItemStore,
     KeyValueStoreOp, StoreItem, StoreOp,
 };
+use fork_choice::fast_confirmation::StateProvider as FcrStateProvider;
 use itertools::{process_results, Itertools};
 use lru::LruCache;
 use parking_lot::{Mutex, RwLock};
@@ -3339,6 +3340,51 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
         self.compact_freezer()?;
 
         Ok(())
+    }
+}
+
+// Newtype wrapper to satisfy coherence rules (foreign trait for local type via local newtype).
+pub struct HotColdDBStateProvider<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
+    pub std::sync::Arc<HotColdDB<E, Hot, Cold>>,
+);
+
+impl<E, Hot, Cold> FcrStateProvider<E> for HotColdDBStateProvider<E, Hot, Cold>
+where
+    E: EthSpec,
+    Hot: ItemStore<E> + 'static,
+    Cold: ItemStore<E> + 'static,
+{
+    type Error = Error;
+
+    fn get_checkpoint_state(
+        &self,
+        checkpoint: &Checkpoint,
+    ) -> Result<Option<&BeaconState<E>>, Self::Error> {
+        // Try to obtain an advanced hot state at or before the checkpoint's start slot.
+        let slot = checkpoint.epoch.start_slot(E::slots_per_epoch());
+        let _ = slot; // placeholder until we add an interior cache to provide references
+        Ok(None)
+    }
+
+    fn get_total_active_balance_at_epoch(&self, epoch: Epoch) -> Result<u64, Self::Error> {
+        // Attempt: use split state (finalized) and compute at requested epoch if matches.
+        let split = self.0.get_split_info();
+        let finalized_epoch = split.slot.epoch(E::slots_per_epoch());
+        if epoch == finalized_epoch {
+            if let Some((_state_root, state)) = self
+                .0
+                .get_advanced_hot_state_from_cache(split.block_root, split.slot)
+            {
+                return state
+                    .get_total_active_balance_at_epoch(epoch)
+                    .map_err(Into::into);
+            }
+        }
+        Err(Error::MissingHotStateSummary(split.state_root))
+    }
+
+    fn chain_spec(&self) -> &ChainSpec {
+        self.0.spec.as_ref()
     }
 }
 

@@ -7,6 +7,7 @@ use fork_choice::{ForkChoice, ResetPayloadStatuses};
 use ssz::{Decode, Encode};
 use ssz_derive::{Decode, Encode};
 use std::sync::Arc;
+use store::hot_cold_store::HotColdDBStateProvider;
 use store::{DBColumn, Error, HotColdDB, KeyValueStore, KeyValueStoreOp, StoreItem};
 use tracing::{debug, info};
 use types::{Hash256, Slot};
@@ -105,6 +106,7 @@ pub fn downgrade_from_v23<T: BeaconChainTypes>(
         fc_store,
         false,
         None,
+        HotColdDBStateProvider(db.clone()),
         &db.spec,
     )
     .map_err(|e| {

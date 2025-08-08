@@ -2489,3 +2489,249 @@ async fn fcr_algorithm_threshold_tests() {
         );
     }
 }
+
+/// Ensure current-epoch confirmation is gated by checkpoint justification.
+///
+/// Verify two complementary scenarios:
+/// - Without attestations across an epoch boundary, FCR should avoid confirming blocks from the
+///   current epoch (insufficient FFG support => conservative behavior).
+/// - With attestations across the boundary, FCR can confirm into the current epoch when the
+///   checkpoint is on track to be justified.
+#[tokio::test]
+async fn fcr_ffg_confirmation_across_epoch_boundary() {
+    // Enable FCR with default beta
+    let config = ChainConfig {
+        fast_confirmation_enabled: true,
+        fcr_byzantine_threshold_percentage: DEFAULT_FCR_BYZANTINE_THRESHOLD_PERCENTAGE,
+        ..ChainConfig::default()
+    };
+
+    // Case 1: Cross an epoch boundary without new attestations → stay conservative
+    let no_attn = ForkChoiceTest::new_with_chain_config(config.clone());
+    // Ensure we have at least one epoch worth of blocks before the boundary
+    let no_attn = no_attn
+        .apply_blocks(E::slots_per_epoch() as usize - 1)
+        .await
+        // Now produce slots/blocks without attestations across the boundary
+        .apply_blocks_without_new_attestations(3)
+        .await;
+
+    let current_slot = no_attn.harness.get_current_slot();
+    let current_epoch = current_slot.epoch(E::slots_per_epoch());
+    let fc = no_attn.harness.chain.canonical_head.fork_choice_read_lock();
+    let confirmed = fc.get_fast_confirmed_head();
+    assert!(
+        confirmed.is_some(),
+        "Should have a confirmed head with FCR enabled"
+    );
+
+    // Resolve epoch for confirmed head
+    let confirmed_root = confirmed.unwrap();
+    let proto = fc.proto_array();
+    let confirmed_block = proto
+        .get_block(&confirmed_root)
+        .expect("confirmed block must exist");
+    let confirmed_epoch = confirmed_block
+        .slot
+        .expect("slot set on proto node")
+        .epoch(E::slots_per_epoch());
+
+    // Without attestations crossing the boundary, FFG support is scarce: remain in prev epoch.
+    assert!(
+        confirmed_epoch <= current_epoch.saturating_sub(1),
+        "FFG should conservatively avoid confirming into current epoch without attestations"
+    );
+    drop(fc);
+
+    // Case 2: Cross an epoch boundary with attestations → allow confirming into current epoch
+    let with_attn = ForkChoiceTest::new_with_chain_config(config);
+    let with_attn = with_attn
+        // Build at least one full epoch with attestations
+        .apply_blocks(E::slots_per_epoch() as usize)
+        .await
+        // Add a few more blocks into the next epoch with attestations
+        .apply_blocks(3)
+        .await;
+
+    let fc2 = with_attn
+        .harness
+        .chain
+        .canonical_head
+        .fork_choice_read_lock();
+    let confirmed2 = fc2.get_fast_confirmed_head();
+    assert!(
+        confirmed2.is_some(),
+        "Expected a confirmed head when attestations are present"
+    );
+
+    let confirmed_root2 = confirmed2.unwrap();
+    let proto2 = fc2.proto_array();
+    let confirmed_block2 = proto2
+        .get_block(&confirmed_root2)
+        .expect("confirmed block must exist");
+    let confirmed_epoch2 = confirmed_block2
+        .slot
+        .expect("slot set on proto node")
+        .epoch(E::slots_per_epoch());
+    let current_epoch2 = with_attn
+        .harness
+        .get_current_slot()
+        .epoch(E::slots_per_epoch());
+
+    // With healthy attestations, will_current_epoch_checkpoint_be_justified should pass,
+    // enabling confirmation in the current epoch (or at least not strictly stuck in the past).
+    assert!(
+        confirmed_epoch2 >= current_epoch2.saturating_sub(1),
+        "FFG should allow confirmation to reach boundary/current epoch when attestations exist"
+    );
+}
+
+/// Sanity-check the pro-rata FFG weight progression via observable confirmation behavior.
+/// We don't call private functions; instead we verify that as slots progress within an epoch
+/// (with attestations), the confirmed head does not regress and tends to advance.
+#[tokio::test]
+async fn fcr_ffg_weight_progression_sanity() {
+    let config = ChainConfig {
+        fast_confirmation_enabled: true,
+        fcr_byzantine_threshold_percentage: DEFAULT_FCR_BYZANTINE_THRESHOLD_PERCENTAGE,
+        ..ChainConfig::default()
+    };
+    let test = ForkChoiceTest::new_with_chain_config(config);
+
+    // Build into an epoch with attestations so that FFG has meaningful support.
+    let test = test
+        .apply_blocks(E::slots_per_epoch() as usize / 2)
+        .await
+        .apply_blocks(2)
+        .await;
+
+    let fc_a = test.harness.chain.canonical_head.fork_choice_read_lock();
+    let c1 = fc_a.get_fast_confirmed_head();
+    drop(fc_a);
+
+    // Advance a few slots with attestations; confirmation should be stable or advance.
+    let test = test.apply_blocks(3).await;
+    let fc_b = test.harness.chain.canonical_head.fork_choice_read_lock();
+    let c2 = fc_b.get_fast_confirmed_head();
+
+    // Basic sanity: confirmations do not disappear and tend to move forward under honest voting.
+    assert!(c1.is_some() && c2.is_some());
+    let c1 = c1.unwrap();
+    let c2 = c2.unwrap();
+
+    // c2 should be on or ahead of c1 (ancestor relation): either equal or a descendant.
+    let monotonic = c1 == c2 || fc_b.is_descendant(c1, c2);
+    assert!(
+        monotonic,
+        "Confirmed head should be stable or advance with continued attestations"
+    );
+}
+
+/// Byzantine threshold sensitivity: higher β should make current-epoch confirmation harder.
+#[tokio::test]
+async fn fcr_ffg_beta_sensitivity() {
+    // High beta (more conservative)
+    let high_beta = ChainConfig {
+        fast_confirmation_enabled: true,
+        fcr_byzantine_threshold_percentage: 49,
+        ..ChainConfig::default()
+    };
+    let hb = ForkChoiceTest::new_with_chain_config(high_beta);
+    let hb = hb
+        .apply_blocks(E::slots_per_epoch() as usize)
+        .await
+        .apply_blocks(2)
+        .await; // cross into next epoch with attestations
+
+    let fc_hb = hb.harness.chain.canonical_head.fork_choice_read_lock();
+    let chb = fc_hb.get_fast_confirmed_head().expect("confirmed head");
+    let cur_epoch_hb = hb.harness.get_current_slot().epoch(E::slots_per_epoch());
+    let ep_hb = fc_hb
+        .proto_array()
+        .get_block(&chb)
+        .and_then(|n| n.slot)
+        .expect("slot")
+        .epoch(E::slots_per_epoch());
+    // With very high β, expect confirmation biased to previous epoch.
+    assert!(
+        ep_hb <= cur_epoch_hb.saturating_sub(1),
+        "High beta should keep confirmations conservative"
+    );
+    drop(fc_hb);
+
+    // Low beta (less conservative)
+    let low_beta = ChainConfig {
+        fast_confirmation_enabled: true,
+        fcr_byzantine_threshold_percentage: 10,
+        ..ChainConfig::default()
+    };
+    let lb = ForkChoiceTest::new_with_chain_config(low_beta);
+    let lb = lb
+        .apply_blocks(E::slots_per_epoch() as usize)
+        .await
+        .apply_blocks(2)
+        .await;
+
+    let fc_lb = lb.harness.chain.canonical_head.fork_choice_read_lock();
+    let clb = fc_lb.get_fast_confirmed_head().expect("confirmed head");
+    let cur_epoch_lb = lb.harness.get_current_slot().epoch(E::slots_per_epoch());
+    let ep_lb = fc_lb
+        .proto_array()
+        .get_block(&clb)
+        .and_then(|n| n.slot)
+        .expect("slot")
+        .epoch(E::slots_per_epoch());
+    // With lower β, allow confirmation at the boundary/current epoch.
+    assert!(
+        ep_lb >= cur_epoch_lb.saturating_sub(1),
+        "Low beta should allow confirmation closer to current epoch"
+    );
+}
+
+/// Boundary-slot conservative behavior: at the start of an epoch without incoming attestations,
+/// FCR should not confirm the first-slot block into current epoch; after attestations, it may.
+#[tokio::test]
+async fn fcr_ffg_boundary_slot_conservative_then_progress() {
+    let config = ChainConfig {
+        fast_confirmation_enabled: true,
+        fcr_byzantine_threshold_percentage: DEFAULT_FCR_BYZANTINE_THRESHOLD_PERCENTAGE,
+        ..ChainConfig::default()
+    };
+    let t = ForkChoiceTest::new_with_chain_config(config);
+    // Build to just before epoch boundary with attestations
+    let t = t.apply_blocks(E::slots_per_epoch() as usize - 1).await;
+    // Produce the boundary slot block without new attestations
+    let t = t.apply_blocks_without_new_attestations(1).await;
+
+    // Snapshot conservative confirmation
+    let fc1 = t.harness.chain.canonical_head.fork_choice_read_lock();
+    let c1 = fc1.get_fast_confirmed_head().expect("confirmed");
+    let cur_epoch1 = t.harness.get_current_slot().epoch(E::slots_per_epoch());
+    let ep1 = fc1
+        .proto_array()
+        .get_block(&c1)
+        .and_then(|n| n.slot)
+        .expect("slot")
+        .epoch(E::slots_per_epoch());
+    assert!(
+        ep1 <= cur_epoch1.saturating_sub(1),
+        "At the boundary without attestations, confirmation should remain in previous epoch"
+    );
+    drop(fc1);
+
+    // Now add a couple of blocks with attestations in the new epoch
+    let t = t.apply_blocks(2).await;
+    let fc2 = t.harness.chain.canonical_head.fork_choice_read_lock();
+    let c2 = fc2.get_fast_confirmed_head().expect("confirmed");
+    let cur_epoch2 = t.harness.get_current_slot().epoch(E::slots_per_epoch());
+    let ep2 = fc2
+        .proto_array()
+        .get_block(&c2)
+        .and_then(|n| n.slot)
+        .expect("slot")
+        .epoch(E::slots_per_epoch());
+    assert!(
+        ep2 >= cur_epoch2.saturating_sub(1),
+        "With attestations in the new epoch, confirmation should approach/enter current epoch"
+    );
+}

@@ -120,9 +120,10 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
 use store::iter::{BlockRootsIterator, ParentRootBlockIterator, StateRootsIterator};
+use store::HotColdDB;
 use store::{
-    BlobSidecarListFromRoot, DatabaseBlock, Error as DBError, HotColdDB, HotStateSummary,
-    KeyValueStoreOp, StoreItem, StoreOp,
+    BlobSidecarListFromRoot, DatabaseBlock, Error as DBError, HotStateSummary, KeyValueStoreOp,
+    StoreItem, StoreOp,
 };
 use task_executor::{ShutdownReason, TaskExecutor};
 use tokio_stream::Stream;
@@ -346,6 +347,8 @@ pub struct BeaconChainMetrics {
 
 pub type LightClientProducerEvent<T> = (Hash256, Slot, SyncAggregate<T>);
 
+use store::hot_cold_store::HotColdDBStateProvider;
+
 pub type BeaconForkChoice<T> = ForkChoice<
     BeaconForkChoiceStore<
         <T as BeaconChainTypes>::EthSpec,
@@ -353,6 +356,11 @@ pub type BeaconForkChoice<T> = ForkChoice<
         <T as BeaconChainTypes>::ColdStore,
     >,
     <T as BeaconChainTypes>::EthSpec,
+    HotColdDBStateProvider<
+        <T as BeaconChainTypes>::EthSpec,
+        <T as BeaconChainTypes>::HotStore,
+        <T as BeaconChainTypes>::ColdStore,
+    >,
 >;
 
 pub type BeaconStore<T> = Arc<
@@ -626,8 +634,10 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             return Ok(None);
         };
 
-        let fc_store =
-            BeaconForkChoiceStore::from_persisted(persisted_fork_choice.fork_choice_store, store)?;
+        let fc_store = BeaconForkChoiceStore::from_persisted(
+            persisted_fork_choice.fork_choice_store,
+            store.clone(),
+        )?;
 
         Ok(Some(ForkChoice::from_persisted(
             persisted_fork_choice.fork_choice,
@@ -636,6 +646,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             // FCR parameters passed from caller
             fcr_enabled,
             fcr_threshold,
+            HotColdDBStateProvider(store.clone()),
             spec,
         )?))
     }

@@ -36,6 +36,7 @@ use state_processing::{per_slot_processing, AllCaches};
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
+use store::hot_cold_store::HotColdDBStateProvider;
 use store::{Error as StoreError, HotColdDB, ItemStore, KeyValueStoreOp};
 use task_executor::{ShutdownReason, TaskExecutor};
 use tracing::{debug, error, info};
@@ -81,7 +82,11 @@ pub struct BeaconChainBuilder<T: BeaconChainTypes> {
     genesis_state_root: Option<Hash256>,
     #[allow(clippy::type_complexity)]
     fork_choice: Option<
-        ForkChoice<BeaconForkChoiceStore<T::EthSpec, T::HotStore, T::ColdStore>, T::EthSpec>,
+        ForkChoice<
+            BeaconForkChoiceStore<T::EthSpec, T::HotStore, T::ColdStore>,
+            T::EthSpec,
+            HotColdDBStateProvider<T::EthSpec, T::HotStore, T::ColdStore>,
+        >,
     >,
     op_pool: Option<OperationPool<T::EthSpec>>,
     execution_layer: Option<ExecutionLayer<T::EthSpec>>,
@@ -398,7 +403,7 @@ where
                 .map_err(|e| format!("Failed to initialize genesis data column info: {:?}", e))?,
         );
 
-        let fc_store = BeaconForkChoiceStore::get_forkchoice_store(store, &genesis)
+        let fc_store = BeaconForkChoiceStore::get_forkchoice_store(store.clone(), &genesis)
             .map_err(|e| format!("Unable to initialize fork choice store: {e:?}"))?;
         let current_slot = None;
 
@@ -412,6 +417,7 @@ where
             self.chain_config
                 .fcr_config()
                 .map(|cfg| cfg.beta_percentage),
+            HotColdDBStateProvider(store.clone()),
             &self.spec,
         )
         .map_err(|e| format!("Unable to initialize ForkChoice: {:?}", e))?;
@@ -624,7 +630,7 @@ where
             beacon_state: weak_subj_state,
         };
 
-        let fc_store = BeaconForkChoiceStore::get_forkchoice_store(store, &snapshot)
+        let fc_store = BeaconForkChoiceStore::get_forkchoice_store(store.clone(), &snapshot)
             .map_err(|e| format!("Unable to initialize fork choice store: {e:?}"))?;
 
         let fork_choice = ForkChoice::from_anchor(
@@ -637,6 +643,7 @@ where
             self.chain_config
                 .fcr_config()
                 .map(|cfg| cfg.beta_percentage),
+            HotColdDBStateProvider(store.clone()),
             &self.spec,
         )
         .map_err(|e| format!("Unable to initialize ForkChoice: {:?}", e))?;

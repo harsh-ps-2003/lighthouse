@@ -8,6 +8,7 @@ use state_processing::{
 };
 use std::sync::Arc;
 use std::time::Duration;
+use store::hot_cold_store::HotColdDBStateProvider;
 use store::{iter::ParentRootBlockIterator, HotColdDB, ItemStore};
 use tracing::{info, warn};
 use types::{BeaconState, ChainSpec, EthSpec, ForkName, Hash256, SignedBeaconBlock, Slot};
@@ -97,7 +98,10 @@ pub fn reset_fork_choice_to_finalization<E: EthSpec, Hot: ItemStore<E>, Cold: It
     store: Arc<HotColdDB<E, Hot, Cold>>,
     current_slot: Option<Slot>,
     spec: &ChainSpec,
-) -> Result<ForkChoice<BeaconForkChoiceStore<E, Hot, Cold>, E>, String> {
+) -> Result<
+    ForkChoice<BeaconForkChoiceStore<E, Hot, Cold>, E, HotColdDBStateProvider<E, Hot, Cold>>,
+    String,
+> {
     // Fetch finalized block.
     let finalized_checkpoint = head_state.finalized_checkpoint();
     let finalized_block_root = finalized_checkpoint.root;
@@ -153,6 +157,7 @@ pub fn reset_fork_choice_to_finalization<E: EthSpec, Hot: ItemStore<E>, Cold: It
         current_slot,
         false,
         None,
+        HotColdDBStateProvider(store.clone()),
         spec,
     )
     .map_err(|e| format!("Unable to reset fork choice for revert: {:?}", e))?;
