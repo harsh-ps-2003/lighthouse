@@ -161,7 +161,7 @@ impl FastConfirmationConfig {
 ///
 /// This stores per-block FCR metadata that would be computed on-demand in the Python spec.
 ///
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct FcrMeta {
     /// LMD-GHOST support weight for this block
     /// **Spec**: Computed in `is_one_confirmed()` as `support`
@@ -172,16 +172,6 @@ pub struct FcrMeta {
     /// Whether this block is confirmed by FCR
     /// **Spec**: Computed on-demand in various functions
     pub confirmed: bool,
-}
-
-impl Default for FcrMeta {
-    fn default() -> Self {
-        Self {
-            support: 0,
-            committee_weight: 0,
-            confirmed: false,
-        }
-    }
 }
 
 /// Store for FCR state across slots and blocks.
@@ -336,7 +326,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     pub fn is_block_confirmed(&self, block_root: &Hash256) -> bool {
         self.meta
             .get(block_root)
-            .map_or(false, |meta| meta.confirmed)
+            .is_some_and(|meta| meta.confirmed)
     }
 
     /// Updates FCR state when transitioning to a new slot.
@@ -609,14 +599,11 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         T: ForkChoiceStore<E>,
     {
         // Get the block to check
-        let block = match proto_array.get_block(&block_root) {
-            Some(block) => block,
-            None => {
-                return Err(ProtoArrayStringError(format!(
-                    "Block {} not found in proto array",
-                    block_root
-                )));
-            }
+        let Some(block) = proto_array.get_block(&block_root) else {
+            return Err(ProtoArrayStringError(format!(
+                "Block {} not found in proto array",
+                block_root
+            )));
         };
 
         // Get the parent block for committee weight calculation
@@ -638,20 +625,17 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
 
         // Get LMD-GHOST support weight (S) from proto array WITHOUT proposer boost
         // FCR specification requires separating support weight from proposer boost
-        let support = match proto_array.get_weight::<E>(
+        let Some(support) = proto_array.get_weight::<E>(
             &block_root,
             None,  // checkpoint_state not needed for basic support calculation
             false, // FCR doesn't want proposer boost included in support
             fc_store.proposer_boost_root(),
             fc_store.chain_spec(),
-        ) {
-            Some(weight) => weight,
-            None => {
-                return Err(ProtoArrayStringError(format!(
-                    "Failed to get weight for block {}",
-                    block_root
-                )));
-            }
+        ) else {
+            return Err(ProtoArrayStringError(format!(
+                "Failed to get weight for block {}",
+                block_root
+            )));
         };
 
         // Get committee weight (W) with proper cross-epoch handling
@@ -663,10 +647,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
 
         // Get proposer boost score separately (as required by FCR spec)
         let proposer_score =
-            match proto_array.get_proposer_score::<E>(block_root, fc_store.chain_spec()) {
-                Some(score) => score,
-                None => 0, // No proposer boost applicable
-            };
+            proto_array.get_proposer_score::<E>(block_root, fc_store.chain_spec()).unwrap_or_default();
 
         // Calculate the Byzantine threshold and current epoch for FCR logic
         let beta_threshold = self.config.beta_percentage;
@@ -775,7 +756,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             // We need to iterate through all blocks in the proto array
             // Since there's no direct iterator, we'll use the indices HashMap
             let proto_array_ref = proto_array.core_proto_array();
-            for (block_root, _) in &proto_array_ref.indices {
+            for block_root in proto_array_ref.indices.keys() {
                 if let Some(block) = proto_array.get_block(block_root) {
                     if let Some(parent) = block.parent_root {
                         if parent == current_root {
@@ -833,10 +814,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         let mut confirmed_root = confirmed_root;
 
         // Get the confirmed block to check its epoch
-        let confirmed_block = match proto_array.get_block(&confirmed_root) {
-            Some(block) => block,
-            None => return None,
-        };
+        let Some(confirmed_block) = proto_array.get_block(&confirmed_root) else { return None };
 
         let confirmed_block_epoch = confirmed_block.slot.epoch(E::slots_per_epoch());
 
@@ -1172,10 +1150,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         const MAX_DEPTH: usize = 1000; // Safety limit
 
         while depth < MAX_DEPTH {
-            let current_block = match proto_array.get_block(&current_root) {
-                Some(block) => block,
-                None => break,
-            };
+            let Some(current_block) = proto_array.get_block(&current_root) else { break };
 
             let current_epoch = current_block.slot.epoch(E::slots_per_epoch());
             if current_epoch == epoch {
@@ -1315,37 +1290,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     /// # Returns
     /// * `Ok(u64)` - The checkpoint weight in Gwei
     /// * `Err(Error)` - Error occurred during calculation
-    fn get_checkpoint_weight<T>(
-        &self,
-        proto_array: &ProtoArrayForkChoice,
-        checkpoint: &Checkpoint,
-        fc_store: &T,
-    ) -> Result<u64, crate::Error<T::Error>>
-    where
-        T: ForkChoiceStore<E>,
-    {
-        let current_slot = fc_store.get_current_slot();
 
-        // Check if we can calculate weight for this checkpoint
-        if current_slot <= checkpoint.epoch.start_slot(E::slots_per_epoch()) {
-            return Ok(0);
-        }
-
-        // Get the checkpoint state for validator analysis
-        let checkpoint_state = match self.state_provider.get_checkpoint_state(checkpoint) {
-            Ok(Some(state)) => state,
-            Ok(None) => {
-                // If checkpoint state is not available, fall back to current justified state
-                return Ok(0);
-            }
-            Err(_) => {
-                // If we can't access the checkpoint state, fall back to current justified state
-                return Ok(0);
-            }
-        };
-
-        self.get_checkpoint_weight_with_state(proto_array, checkpoint, fc_store, checkpoint_state)
-    }
 
     /// Gets the checkpoint weight for FFG analysis using a provided checkpoint state.
     ///
@@ -1425,7 +1370,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     fn validator_vote_supports_checkpoint(
         &self,
         proto_array: &ProtoArrayForkChoice,
-        validator_index: usize,
+        _validator_index: usize,
         vote_root: Hash256,
         vote_epoch: Epoch,
         checkpoint: &Checkpoint,
@@ -1459,14 +1404,14 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         let epoch_end_slot = epoch.end_slot(E::slots_per_epoch());
 
         if slot <= epoch_start_slot {
-            return 0;
+            0
         } else if slot >= epoch_end_slot {
-            return total_active_balance;
+            total_active_balance
         } else {
             // Calculate pro-rata weight for slots within the epoch
             let slots_passed = slot.as_u64() - epoch_start_slot.as_u64();
             let slots_per_epoch = E::slots_per_epoch();
-            return total_active_balance / slots_per_epoch * slots_passed;
+            total_active_balance / slots_per_epoch * slots_passed
         }
     }
 
@@ -1690,14 +1635,11 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         T: ForkChoiceStore<E>,
     {
         // Get the finalized block to determine the pruning boundary
-        let finalized_block = match proto_array.get_block(&finalized_root) {
-            Some(block) => block,
-            None => {
-                // If finalized block not found, something is wrong
-                return Err(ProtoArrayStringError(
-                    "Finalized block not found in proto array during FCR pruning".to_string(),
-                ));
-            }
+        let Some(finalized_block) = proto_array.get_block(&finalized_root) else {
+            // If finalized block not found, something is wrong
+            return Err(ProtoArrayStringError(
+                "Finalized block not found in proto array during FCR pruning".to_string(),
+            ));
         };
 
         // Remove FCR metadata for blocks that are no longer in the proto array
@@ -1766,7 +1708,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             // Same epoch: simple pro-rata calculation
             let slots_covered = end_slot - start_slot + 1;
             let weight_per_slot = total_active_balance / E::slots_per_epoch();
-            return Ok(weight_per_slot * slots_covered.as_u64());
+            Ok(weight_per_slot * slots_covered.as_u64())
         } else {
             // Cross-epoch boundary: complex calculation with safety adjustment
             let estimate = match self.calculate_cross_epoch_weight_estimate(
