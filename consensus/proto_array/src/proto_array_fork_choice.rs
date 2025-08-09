@@ -846,13 +846,28 @@ impl ProtoArrayForkChoice {
     pub fn get_weight<E: EthSpec>(
         &self,
         block_root: &Hash256,
-        _checkpoint_state: Option<&types::BeaconState<E>>,
+        _checkpoint_state: Option<&types::BeaconState<E>>, // Intentionally ignored: S comes from precomputed node.weight
         include_proposer_boost: bool,
         proposer_boost_root: Hash256,
         spec: &types::ChainSpec,
     ) -> Option<u64> {
         let block_index = self.proto_array.indices.get(block_root)?;
         let node = self.proto_array.nodes.get(*block_index)?;
+
+        // Architectural note (FCR):
+        // - Python spec allows computing support S against a "weighting checkpoint state".
+        // - In Lighthouse, S is derived from node.weight which is refreshed during
+        //   apply_score_changes()/compute_deltas() using the current justified view and
+        //   vote trackers. This refresh happens on each get_head() cycle and is already
+        //   optimized.
+        // - We purposely keep get_weight() a thin accessor over node.weight and do NOT
+        //   re-evaluate votes against an arbitrary BeaconState here. Doing so would create
+        //   a second ad-hoc weight pipeline and risk divergence from the canonical fork-choice
+        //   computation.
+        // - To align with the spec, FCR uses the weighting checkpoint state when computing W
+        //   (maximum possible support) and thresholds, while S comes from node.weight here.
+        //   This keeps a single source of truth for S and leverages ProtoArray’s optimized
+        //   recomputation path.
 
         // Start with the base attestation score (node weight)
         let mut weight = node.weight;

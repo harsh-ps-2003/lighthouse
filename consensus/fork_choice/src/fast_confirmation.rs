@@ -621,11 +621,31 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             }
         };
 
+        // Use weighting checkpoint state for both S and W when available
+        // If current slot is at epoch boundary, use prev_slot_unrealized_justified_checkpoint,
+        // otherwise use prev_slot_justified_checkpoint.
+        let weighting_checkpoint = if fc_store.get_current_slot() % E::slots_per_epoch() == 0 {
+            self.fcr_store.prev_slot_unrealized_justified_checkpoint
+        } else {
+            self.fcr_store.prev_slot_justified_checkpoint
+        };
+
+        // Try to obtain the checkpoint state via the StateProvider. If unavailable, fall back
+        // to pre-existing behavior that uses no checkpoint state and justified_balances.
+        let weighting_checkpoint_state_opt = self
+            .state_provider
+            .get_checkpoint_state(&weighting_checkpoint)
+            .ok()
+            .flatten();
+
         // Get LMD-GHOST support weight (S) from proto array WITHOUT proposer boost
-        // FCR specification requires separating support weight from proposer boost
+        // Supply the weighting checkpoint state if available per spec.
+        // Note: proto_array.get_weight currently ignores the optional checkpoint_state
+        // (argument named `_checkpoint_state`). We therefore pass `None` here and rely on
+        // the weighting checkpoint state only for W (maximum support) per spec update.
         let Some(support) = proto_array.get_weight::<E>(
             &block_root,
-            None,  // checkpoint_state not needed for basic support calculation
+            None,
             false, // FCR doesn't want proposer boost included in support
             fc_store.proposer_boost_root(),
             fc_store.chain_spec(),
@@ -636,21 +656,58 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             )));
         };
 
-        // Get committee weight (W) with proper cross-epoch handling
-        let committee_weight = self.get_committee_weight_between_slots(
-            parent_block.slot + 1,
-            fc_store.get_current_slot() - 1,
-            fc_store,
-        )?;
+        // Compute committee weight (W) using the weighting checkpoint state if present,
+        // otherwise fall back to the existing fc_store-based calculation.
+        let start_slot = parent_block.slot + 1;
+        let end_slot = fc_store.get_current_slot() - 1;
+
+        let committee_weight = if let Some(weighting_state) = weighting_checkpoint_state_opt {
+            // Use TAB derived from the weighting checkpoint state, mirroring the Python spec
+            let total_active_balance = weighting_state
+                .get_total_active_balance()
+                .unwrap_or(fc_store.justified_balances().total_effective_balance);
+
+            if start_slot > end_slot {
+                0
+            } else if self.is_full_validator_set_covered(start_slot, end_slot) {
+                total_active_balance
+            } else {
+                let start_epoch = start_slot.epoch(E::slots_per_epoch());
+                let end_epoch = end_slot.epoch(E::slots_per_epoch());
+                if start_epoch == end_epoch {
+                    let slots_covered = end_slot - start_slot + 1;
+                    let weight_per_slot = total_active_balance / E::slots_per_epoch();
+                    weight_per_slot * slots_covered.as_u64()
+                } else {
+                    // Cross-epoch boundary calculation with safety adjustment
+                    let estimate = match self.calculate_cross_epoch_weight_estimate(
+                        start_slot,
+                        end_slot,
+                        total_active_balance,
+                    ) {
+                        Ok(estimate) => estimate,
+                        Err(_) => {
+                            // Conservative fallback
+                            let slots_covered = end_slot - start_slot + 1;
+                            let weight_per_slot = total_active_balance / E::slots_per_epoch();
+                            weight_per_slot * slots_covered.as_u64()
+                        }
+                    };
+                    self.adjust_committee_weight_estimate_to_ensure_safety(estimate)
+                }
+            }
+        } else {
+            // Fallback: use the existing method which relies on justified_balances
+            self.get_committee_weight_between_slots(start_slot, end_slot, fc_store)?
+        };
 
         // Get proposer boost score separately (as required by FCR spec)
         let proposer_score = proto_array
             .get_proposer_score::<E>(block_root, fc_store.chain_spec())
             .unwrap_or_default();
 
-        // Calculate the Byzantine threshold and current epoch for FCR logic
+        // Calculate the Byzantine threshold
         let beta_threshold = self.config.beta_percentage;
-        let current_epoch = fc_store.get_current_slot().epoch(E::slots_per_epoch());
 
         // Apply the FCR formula: 2 * S > W + W // 50 * CONFIRMATION_BYZANTINE_THRESHOLD + proposer_score
         // **Python Specification**: 2 * support > maximum_support + maximum_support // 50 * CONFIRMATION_BYZANTINE_THRESHOLD + proposer_score
@@ -668,6 +725,8 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         // Check FFG confirmation (checkpoint justification)
         // Get the checkpoint for this block's epoch
         let block_epoch = block.slot.epoch(E::slots_per_epoch());
+
+        let current_epoch = fc_store.get_current_slot().epoch(E::slots_per_epoch());
 
         // Use current_epoch for epoch boundary checks
         if block_epoch > current_epoch {
