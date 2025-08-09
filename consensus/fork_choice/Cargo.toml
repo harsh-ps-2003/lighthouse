@@ -17,6 +17,7 @@ types = { workspace = true }
 lru = { workspace = true }
 
 [dev-dependencies]
+proptest = "1"
 beacon_chain = { workspace = true }
 store = { workspace = true }
 tokio = { workspace = true }
