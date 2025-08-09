@@ -945,7 +945,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         // Check if the voting source epoch is within the required range
         // This ensures that the previous slot's head is recent enough
         let voting_source_epoch = self
-            .get_voting_source_epoch(proto_array, head_root)
+            .get_voting_source_epoch(proto_array, fc_store, head_root)
             .unwrap();
 
         Ok(voting_source_epoch + 2 >= current_epoch)
@@ -959,28 +959,43 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     /// The voting source is the block that validators are voting for when they
     /// vote for the given block.
     ///
-    /// # Arguments
-    /// * `proto_array` - The proto array containing the block DAG
-    /// * `block_root` - The block root to get the voting source epoch for
-    ///
     /// # Returns
     /// * `Ok(Epoch)` - The voting source epoch
     /// * `Err(Error)` - Error occurred during calculation
-    fn get_voting_source_epoch(
+    fn get_voting_source_epoch<T>(
         &self,
         proto_array: &ProtoArrayForkChoice,
+        fc_store: &T,
         block_root: Hash256,
-    ) -> Result<Epoch, crate::Error<String>> {
-        // For simplicity, we'll use the block's epoch as the voting source epoch
-        // In a more sophisticated implementation, this would analyze the actual
-        // voting patterns to determine the voting source
-        if let Some(block) = proto_array.get_block(&block_root) {
-            Ok(block.slot.epoch(E::slots_per_epoch()))
-        } else {
-            Err(crate::Error::ProtoArrayStringError(
-                "Block not found for voting source calculation".to_string(),
-            ))
+    ) -> Result<Epoch, crate::Error<String>>
+    where
+        T: ForkChoiceStore<E>,
+    {
+        use std::collections::HashMap;
+        let balances = &fc_store.justified_balances().effective_balances;
+
+        let mut epoch_to_weight: HashMap<Epoch, u128> = HashMap::new();
+        for (validator_index, &eb) in balances.iter().enumerate() {
+            if eb == 0 {
+                continue;
+            }
+            if let Some((vote_root, vote_epoch)) = proto_array.latest_message(validator_index) {
+                // Consider votes that support (are descendants of) the given block_root
+                if proto_array.is_descendant(block_root, vote_root) {
+                    *epoch_to_weight.entry(vote_epoch).or_insert(0) += eb as u128;
+                }
+            }
         }
+
+        if let Some((best_epoch, _)) = epoch_to_weight.into_iter().max_by_key(|(_, w)| *w) {
+            return Ok(best_epoch);
+        }
+
+        // Fallback: use prev_slot_unrealized_justified_checkpoint epoch as conservative proxy
+        Ok(self
+            .fcr_store
+            .prev_slot_unrealized_justified_checkpoint
+            .epoch)
     }
 
     /// Checks unrealized justification conditions for confirmation advancement.
@@ -1318,7 +1333,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         if tentative_epoch == current_epoch {
             // Check if the voting source epoch is recent enough
             let voting_source_epoch = self
-                .get_voting_source_epoch(proto_array, tentative_confirmed)
+                .get_voting_source_epoch(proto_array, fc_store, tentative_confirmed)
                 .unwrap();
             return Ok(voting_source_epoch + 2 >= current_epoch);
         }
@@ -1387,22 +1402,20 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         for validator_index in 0..checkpoint_state.validators().len() {
             // Get the validator's latest message
             if let Some((vote_root, vote_epoch)) = proto_array.latest_message(validator_index) {
-                // Check if this validator's vote supports the checkpoint
-                if self
-                    .validator_vote_supports_checkpoint(
-                        proto_array,
-                        validator_index,
-                        vote_root,
-                        vote_epoch,
-                        checkpoint,
-                    )
-                    .unwrap()
+                // Only votes from the same epoch support the checkpoint
+                if vote_epoch != checkpoint.epoch {
+                    continue;
+                }
+                // Derive the vote target checkpoint per spec
+                if let Some(vote_target_root) =
+                    self.get_checkpoint_block(proto_array, vote_root, vote_epoch)
                 {
-                    // Add the validator's effective balance to the checkpoint weight
-                    let effective_balance = checkpoint_state
-                        .get_effective_balance(validator_index)
-                        .unwrap_or(0);
-                    checkpoint_weight += effective_balance;
+                    if vote_target_root == checkpoint.root {
+                        let effective_balance = checkpoint_state
+                            .get_effective_balance(validator_index)
+                            .unwrap_or(0);
+                        checkpoint_weight = checkpoint_weight.saturating_add(effective_balance);
+                    }
                 }
             }
         }
@@ -1462,11 +1475,11 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     /// * `u64` - The FFG weight up to the slot
     fn get_ffg_weight_till_slot(&self, slot: Slot, epoch: Epoch, total_active_balance: u64) -> u64 {
         let epoch_start_slot = epoch.start_slot(E::slots_per_epoch());
-        let epoch_end_slot = epoch.end_slot(E::slots_per_epoch());
+        let next_epoch_start = (epoch + 1).start_slot(E::slots_per_epoch());
 
         if slot <= epoch_start_slot {
             0
-        } else if slot >= epoch_end_slot {
+        } else if slot >= next_epoch_start {
             total_active_balance
         } else {
             // Calculate pro-rata weight for slots within the epoch
@@ -1857,28 +1870,27 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         end_slot: Slot,
         total_active_balance: u64,
     ) -> Result<u64, crate::Error<String>> {
-        let start_epoch = start_slot.epoch(E::slots_per_epoch());
-        let end_epoch = end_slot.epoch(E::slots_per_epoch());
+        let slots_per_epoch = E::slots_per_epoch();
+        let start_epoch = start_slot.epoch(slots_per_epoch);
+        let end_epoch = end_slot.epoch(slots_per_epoch);
 
-        // Calculate slots in each epoch using simple arithmetic
-        let start_epoch_slot = start_epoch * E::slots_per_epoch();
-        let end_epoch_slot = end_epoch * E::slots_per_epoch();
+        // End epoch component
+        let num_slots_in_end_epoch =
+            end_slot.as_u64() - end_epoch.start_slot(slots_per_epoch).as_u64() + 1;
+        let end_epoch_weight_estimate =
+            (total_active_balance / slots_per_epoch).saturating_mul(num_slots_in_end_epoch);
 
-        let slots_since_start = start_slot.as_u64() - start_epoch_slot.as_u64();
-        let slots_since_end = end_slot.as_u64() - end_epoch_slot.as_u64();
+        // Start epoch component (pro-rated)
+        let num_slots_in_start_epoch = slots_per_epoch
+            - (start_slot.as_u64() - start_epoch.start_slot(slots_per_epoch).as_u64());
+        let remaining_slots_in_end_epoch =
+            slots_per_epoch - (num_slots_in_end_epoch % slots_per_epoch);
 
-        let slots_in_start_epoch = E::slots_per_epoch() - slots_since_start;
-        let slots_in_end_epoch = slots_since_end + 1;
+        let start_epoch_weight_estimate =
+            (total_active_balance / slots_per_epoch / slots_per_epoch)
+                .saturating_mul(num_slots_in_start_epoch)
+                .saturating_mul(remaining_slots_in_end_epoch);
 
-        // Calculate weight estimates for each epoch
-        let weight_per_slot = total_active_balance / E::slots_per_epoch();
-        let start_epoch_weight = weight_per_slot * slots_in_start_epoch;
-        let end_epoch_weight = weight_per_slot * slots_in_end_epoch;
-
-        // Cross-epoch adjustment: each committee from end epoch only contributes pro-rated weight
-        let cross_epoch_adjustment =
-            (weight_per_slot / E::slots_per_epoch()) * slots_in_start_epoch * slots_in_end_epoch;
-
-        Ok(start_epoch_weight + end_epoch_weight - cross_epoch_adjustment)
+        Ok(start_epoch_weight_estimate.saturating_add(end_epoch_weight_estimate))
     }
 }

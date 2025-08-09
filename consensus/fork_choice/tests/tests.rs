@@ -2650,7 +2650,6 @@ async fn fcr_unit_is_one_confirmed_future_epoch_guard() {
         confirmed_epoch <= head_epoch,
         "no future-epoch confirmations"
     );
-    let _ = current_slot; // silence if unused in some configs
 }
 
 /// Unit: get_committee_weight_between_slots same-epoch and cross-epoch totals are bounded by TAB
@@ -2673,7 +2672,7 @@ async fn fcr_unit_committee_weight_bounds() {
 
     // Use public API to force internal computation through get_fast_confirmed_head path,
     // and rely on invariants checked below.
-    let _ = fc.get_fast_confirmed_head();
+    let _confirmed = fc.get_fast_confirmed_head();
 
     // Same-epoch slice
     let same_epoch = start.epoch(E::slots_per_epoch()) == end.epoch(E::slots_per_epoch());
