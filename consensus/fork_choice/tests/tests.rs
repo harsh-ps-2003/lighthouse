@@ -369,7 +369,7 @@ impl ForkChoiceTest {
     /// database.
     fn check_justified_balances(&self) {
         let harness = &self.harness;
-        let fc = self.harness.chain.canonical_head.fork_choice_read_lock();
+        let fork_choice = self.harness.chain.canonical_head.fork_choice_read_lock();
 
         let state_root = harness
             .chain
@@ -399,12 +399,18 @@ impl ForkChoiceTest {
 
         assert_eq!(
             &balances[..],
-            &fc.fc_store().justified_balances().effective_balances,
+            &fork_choice
+                .fc_store()
+                .justified_balances()
+                .effective_balances,
             "balances should match"
         );
         assert_eq!(
             balances.iter().sum::<u64>(),
-            fc.fc_store().justified_balances().total_effective_balance
+            fork_choice
+                .fc_store()
+                .justified_balances()
+                .total_effective_balance
         );
     }
 
@@ -2385,28 +2391,33 @@ async fn fcr_ffg_confirmation_across_epoch_boundary() {
     };
 
     // Case 1: Cross an epoch boundary without new attestations → stay conservative
-    let no_attn = ForkChoiceTest::new_with_chain_config(config.clone());
+    // Build a chain that crosses an epoch boundary without fresh attestations in the new epoch.
+    let chain_without_attestations = ForkChoiceTest::new_with_chain_config(config.clone());
     // Ensure we have at least one epoch worth of blocks before the boundary
-    let no_attn = no_attn
+    let chain_without_attestations = chain_without_attestations
         .apply_blocks(E::slots_per_epoch() as usize - 1)
         .await
         // Now produce slots/blocks without attestations across the boundary
         .apply_blocks_without_new_attestations(3)
         .await;
 
-    let current_slot = no_attn.harness.get_current_slot();
+    let current_slot = chain_without_attestations.harness.get_current_slot();
     let current_epoch = current_slot.epoch(E::slots_per_epoch());
-    let fc = no_attn.harness.chain.canonical_head.fork_choice_read_lock();
-    let confirmed = fc.get_fast_confirmed_head();
+    let fork_choice_without_attn = chain_without_attestations
+        .harness
+        .chain
+        .canonical_head
+        .fork_choice_read_lock();
+    let confirmed_head_without_attn = fork_choice_without_attn.get_fast_confirmed_head();
     assert!(
-        confirmed.is_some(),
+        confirmed_head_without_attn.is_some(),
         "Should have a confirmed head with FCR enabled"
     );
 
     // Resolve epoch for confirmed head
-    let confirmed_root = confirmed.unwrap();
-    let proto = fc.proto_array();
-    let confirmed_block = proto
+    let confirmed_root = confirmed_head_without_attn.unwrap();
+    let proto_array = fork_choice_without_attn.proto_array();
+    let confirmed_block = proto_array
         .get_block(&confirmed_root)
         .expect("confirmed block must exist");
     let confirmed_epoch = confirmed_block.slot.epoch(E::slots_per_epoch());
@@ -2416,11 +2427,12 @@ async fn fcr_ffg_confirmation_across_epoch_boundary() {
         confirmed_epoch <= current_epoch.saturating_sub(Epoch::new(1)),
         "FFG should conservatively avoid confirming into current epoch without attestations"
     );
-    drop(fc);
+    drop(fork_choice_without_attn);
 
     // Case 2: Cross an epoch boundary with attestations → allow confirming into current epoch
-    let with_attn = ForkChoiceTest::new_with_chain_config(config);
-    let with_attn = with_attn
+    // Build a chain that crosses an epoch boundary with healthy attestations in the new epoch.
+    let chain_with_attestations = ForkChoiceTest::new_with_chain_config(config);
+    let chain_with_attestations = chain_with_attestations
         // Build at least one full epoch with attestations
         .apply_blocks(E::slots_per_epoch() as usize)
         .await
@@ -2428,24 +2440,24 @@ async fn fcr_ffg_confirmation_across_epoch_boundary() {
         .apply_blocks(3)
         .await;
 
-    let fc2 = with_attn
+    let fork_choice_with_attn = chain_with_attestations
         .harness
         .chain
         .canonical_head
         .fork_choice_read_lock();
-    let confirmed2 = fc2.get_fast_confirmed_head();
+    let confirmed_head_with_attn = fork_choice_with_attn.get_fast_confirmed_head();
     assert!(
-        confirmed2.is_some(),
+        confirmed_head_with_attn.is_some(),
         "Expected a confirmed head when attestations are present"
     );
 
-    let confirmed_root2 = confirmed2.unwrap();
-    let proto2 = fc2.proto_array();
-    let confirmed_block2 = proto2
+    let confirmed_root2 = confirmed_head_with_attn.unwrap();
+    let proto_array2 = fork_choice_with_attn.proto_array();
+    let confirmed_block2 = proto_array2
         .get_block(&confirmed_root2)
         .expect("confirmed block must exist");
     let confirmed_epoch2 = confirmed_block2.slot.epoch(E::slots_per_epoch());
-    let current_epoch2 = with_attn
+    let current_epoch2 = chain_with_attestations
         .harness
         .get_current_slot()
         .epoch(E::slots_per_epoch());
@@ -2477,22 +2489,23 @@ async fn fcr_ffg_weight_progression_sanity() {
         .apply_blocks(2)
         .await;
 
-    let fc_a = test.harness.chain.canonical_head.fork_choice_read_lock();
-    let c1 = fc_a.get_fast_confirmed_head();
-    drop(fc_a);
+    // Snapshot current confirmed head.
+    let fork_choice_before = test.harness.chain.canonical_head.fork_choice_read_lock();
+    let confirmed_before = fork_choice_before.get_fast_confirmed_head();
+    drop(fork_choice_before);
 
     // Advance a few slots with attestations; confirmation should be stable or advance.
     let test = test.apply_blocks(3).await;
-    let fc_b = test.harness.chain.canonical_head.fork_choice_read_lock();
-    let c2 = fc_b.get_fast_confirmed_head();
+    let fork_choice_after = test.harness.chain.canonical_head.fork_choice_read_lock();
+    let confirmed_after = fork_choice_after.get_fast_confirmed_head();
 
     // Basic sanity: confirmations do not disappear and tend to move forward under honest voting.
-    assert!(c1.is_some() && c2.is_some());
-    let c1 = c1.unwrap();
-    let c2 = c2.unwrap();
+    assert!(confirmed_before.is_some() && confirmed_after.is_some());
+    let c1 = confirmed_before.unwrap();
+    let c2 = confirmed_after.unwrap();
 
     // c2 should be on or ahead of c1 (ancestor relation): either equal or a descendant.
-    let monotonic = c1 == c2 || fc_b.is_descendant(c1, c2);
+    let monotonic = c1 == c2 || fork_choice_after.is_descendant(c1, c2);
     assert!(
         monotonic,
         "Confirmed head should be stable or advance with continued attestations"
@@ -2508,28 +2521,37 @@ async fn fcr_ffg_beta_sensitivity() {
         fcr_byzantine_threshold_percentage: 49,
         ..ChainConfig::default()
     };
-    let hb = ForkChoiceTest::new_with_chain_config(high_beta);
-    let hb = hb
+    let high_beta_chain = ForkChoiceTest::new_with_chain_config(high_beta);
+    let high_beta_chain = high_beta_chain
         .apply_blocks(E::slots_per_epoch() as usize)
         .await
         .apply_blocks(2)
         .await; // cross into next epoch with attestations
 
-    let fc_hb = hb.harness.chain.canonical_head.fork_choice_read_lock();
-    let chb = fc_hb.get_fast_confirmed_head().expect("confirmed head");
-    let cur_epoch_hb = hb.harness.get_current_slot().epoch(E::slots_per_epoch());
-    let ep_hb = fc_hb
+    let fork_choice_high_beta = high_beta_chain
+        .harness
+        .chain
+        .canonical_head
+        .fork_choice_read_lock();
+    let confirmed_high_beta = fork_choice_high_beta
+        .get_fast_confirmed_head()
+        .expect("confirmed head");
+    let current_epoch_high_beta = high_beta_chain
+        .harness
+        .get_current_slot()
+        .epoch(E::slots_per_epoch());
+    let confirmed_epoch_high_beta = fork_choice_high_beta
         .proto_array()
-        .get_block(&chb)
+        .get_block(&confirmed_high_beta)
         .and_then(|n| Some(n.slot))
         .expect("slot")
         .epoch(E::slots_per_epoch());
     // With very high β, expect confirmation biased to previous epoch.
     assert!(
-        ep_hb <= cur_epoch_hb.saturating_sub(Epoch::new(1)),
+        confirmed_epoch_high_beta <= current_epoch_high_beta.saturating_sub(Epoch::new(1)),
         "High beta should keep confirmations conservative"
     );
-    drop(fc_hb);
+    drop(fork_choice_high_beta);
 
     // Low beta (less conservative)
     let low_beta = ChainConfig {
@@ -2537,25 +2559,34 @@ async fn fcr_ffg_beta_sensitivity() {
         fcr_byzantine_threshold_percentage: 10,
         ..ChainConfig::default()
     };
-    let lb = ForkChoiceTest::new_with_chain_config(low_beta);
-    let lb = lb
+    let low_beta_chain = ForkChoiceTest::new_with_chain_config(low_beta);
+    let low_beta_chain = low_beta_chain
         .apply_blocks(E::slots_per_epoch() as usize)
         .await
         .apply_blocks(2)
         .await;
 
-    let fc_lb = lb.harness.chain.canonical_head.fork_choice_read_lock();
-    let clb = fc_lb.get_fast_confirmed_head().expect("confirmed head");
-    let cur_epoch_lb = lb.harness.get_current_slot().epoch(E::slots_per_epoch());
-    let ep_lb = fc_lb
+    let fork_choice_low_beta = low_beta_chain
+        .harness
+        .chain
+        .canonical_head
+        .fork_choice_read_lock();
+    let confirmed_low_beta = fork_choice_low_beta
+        .get_fast_confirmed_head()
+        .expect("confirmed head");
+    let current_epoch_low_beta = low_beta_chain
+        .harness
+        .get_current_slot()
+        .epoch(E::slots_per_epoch());
+    let confirmed_epoch_low_beta = fork_choice_low_beta
         .proto_array()
-        .get_block(&clb)
+        .get_block(&confirmed_low_beta)
         .and_then(|n| Some(n.slot))
         .expect("slot")
         .epoch(E::slots_per_epoch());
     // With lower β, allow confirmation at the boundary/current epoch.
     assert!(
-        ep_lb >= cur_epoch_lb.saturating_sub(Epoch::new(1)),
+        confirmed_epoch_low_beta >= current_epoch_low_beta.saturating_sub(Epoch::new(1)),
         "Low beta should allow confirmation closer to current epoch"
     );
 }
@@ -2569,41 +2600,45 @@ async fn fcr_ffg_boundary_slot_conservative_then_progress() {
         fcr_byzantine_threshold_percentage: DEFAULT_FCR_BYZANTINE_THRESHOLD_PERCENTAGE,
         ..ChainConfig::default()
     };
-    let t = ForkChoiceTest::new_with_chain_config(config);
+    let chain = ForkChoiceTest::new_with_chain_config(config);
     // Build to just before epoch boundary with attestations
-    let t = t.apply_blocks(E::slots_per_epoch() as usize - 1).await;
+    let chain = chain.apply_blocks(E::slots_per_epoch() as usize - 1).await;
     // Produce the boundary slot block without new attestations
-    let t = t.apply_blocks_without_new_attestations(1).await;
+    let chain = chain.apply_blocks_without_new_attestations(1).await;
 
     // Snapshot conservative confirmation
-    let fc1 = t.harness.chain.canonical_head.fork_choice_read_lock();
-    let c1 = fc1.get_fast_confirmed_head().expect("confirmed");
-    let cur_epoch1 = t.harness.get_current_slot().epoch(E::slots_per_epoch());
-    let ep1 = fc1
+    let fork_choice_before = chain.harness.chain.canonical_head.fork_choice_read_lock();
+    let confirmed_before = fork_choice_before
+        .get_fast_confirmed_head()
+        .expect("confirmed");
+    let current_epoch_before = chain.harness.get_current_slot().epoch(E::slots_per_epoch());
+    let confirmed_epoch_before = fork_choice_before
         .proto_array()
-        .get_block(&c1)
+        .get_block(&confirmed_before)
         .and_then(|n| Some(n.slot))
         .expect("slot")
         .epoch(E::slots_per_epoch());
     assert!(
-        ep1 <= cur_epoch1.saturating_sub(Epoch::new(1)),
+        confirmed_epoch_before <= current_epoch_before.saturating_sub(Epoch::new(1)),
         "At the boundary without attestations, confirmation should remain in previous epoch"
     );
-    drop(fc1);
+    drop(fork_choice_before);
 
     // Now add a couple of blocks with attestations in the new epoch
-    let t = t.apply_blocks(2).await;
-    let fc2 = t.harness.chain.canonical_head.fork_choice_read_lock();
-    let c2 = fc2.get_fast_confirmed_head().expect("confirmed");
-    let cur_epoch2 = t.harness.get_current_slot().epoch(E::slots_per_epoch());
-    let ep2 = fc2
+    let chain = chain.apply_blocks(2).await;
+    let fork_choice_after = chain.harness.chain.canonical_head.fork_choice_read_lock();
+    let confirmed_after = fork_choice_after
+        .get_fast_confirmed_head()
+        .expect("confirmed");
+    let current_epoch_after = chain.harness.get_current_slot().epoch(E::slots_per_epoch());
+    let confirmed_epoch_after = fork_choice_after
         .proto_array()
-        .get_block(&c2)
+        .get_block(&confirmed_after)
         .and_then(|n| Some(n.slot))
         .expect("slot")
         .epoch(E::slots_per_epoch());
     assert!(
-        ep2 >= cur_epoch2.saturating_sub(Epoch::new(1)),
+        confirmed_epoch_after >= current_epoch_after.saturating_sub(Epoch::new(1)),
         "With attestations in the new epoch, confirmation should approach/enter current epoch"
     );
 }
@@ -2623,25 +2658,25 @@ async fn fcr_unit_is_one_confirmed_future_epoch_guard() {
         .apply_blocks(2)
         .await;
 
-    let fc = test.harness.chain.canonical_head.fork_choice_read_lock();
-    let head = test.harness.head_block_root();
-    let current_slot = test.harness.get_current_slot();
+    let fork_choice = test.harness.chain.canonical_head.fork_choice_read_lock();
+    let head_root = test.harness.head_block_root();
+    let _current_slot = test.harness.get_current_slot();
 
     // Try to confirm a "future" by pretending current_slot is earlier (simulate via API):
     // We cannot directly call private is_one_confirmed; instead we assert that returned
     // confirmed head never exceeds the canonical head epoch when there is no support.
-    let confirmed = fc.get_fast_confirmed_head();
+    let confirmed = fork_choice.get_fast_confirmed_head();
     assert!(confirmed.is_some());
 
     let confirmed_root = confirmed.unwrap();
-    let proto = fc.proto_array();
-    let confirmed_epoch = proto
+    let proto_array = fork_choice.proto_array();
+    let confirmed_epoch = proto_array
         .get_block(&confirmed_root)
         .expect("confirmed exists")
         .slot
         .epoch(E::slots_per_epoch());
-    let head_epoch = proto
-        .get_block(&head)
+    let head_epoch = proto_array
+        .get_block(&head_root)
         .expect("head exists")
         .slot
         .epoch(E::slots_per_epoch());
@@ -2664,38 +2699,41 @@ async fn fcr_unit_committee_weight_bounds() {
         .apply_blocks(3)
         .await;
 
-    let fc = test.harness.chain.canonical_head.fork_choice_read_lock();
+    let fork_choice = test.harness.chain.canonical_head.fork_choice_read_lock();
     let current_slot = test.harness.get_current_slot();
-    let start = current_slot.saturating_sub(Slot::new(2));
-    let end = current_slot.saturating_sub(Slot::new(1));
-    let tab = fc.fc_store().justified_balances().total_effective_balance;
+    let start_slot = current_slot.saturating_sub(Slot::new(2));
+    let end_slot = current_slot.saturating_sub(Slot::new(1));
+    let total_active_balance = fork_choice
+        .fc_store()
+        .justified_balances()
+        .total_effective_balance;
 
     // Use public API to force internal computation through get_fast_confirmed_head path,
     // and rely on invariants checked below.
-    let _confirmed = fc.get_fast_confirmed_head();
+    let _confirmed = fork_choice.get_fast_confirmed_head();
 
     // Same-epoch slice
-    let same_epoch = start.epoch(E::slots_per_epoch()) == end.epoch(E::slots_per_epoch());
+    let same_epoch = start_slot.epoch(E::slots_per_epoch()) == end_slot.epoch(E::slots_per_epoch());
     if same_epoch {
         // bound check via formula mirror: slots_covered * (tab / slots_per_epoch) <= tab
-        let slots_covered = end - start + 1;
-        let per_slot = tab / E::slots_per_epoch();
+        let slots_covered = end_slot - start_slot + 1;
+        let per_slot = total_active_balance / E::slots_per_epoch();
         let est = per_slot * slots_covered.as_u64();
-        assert!(est <= tab);
+        assert!(est <= total_active_balance);
     }
 
     // Cross-epoch slice
-    let start2 = end;
-    let end2 = end + 2;
+    let start2 = end_slot;
+    let end2 = end_slot + 2;
     let start2_epoch = start2.epoch(E::slots_per_epoch());
     let end2_epoch = end2.epoch(E::slots_per_epoch());
     if start2_epoch != end2_epoch {
         // simple bound: estimator never exceeds TAB * 2 (loose), and after adjustment still <= TAB * 2
         // This is a liveness sanity bound; exact value is verified by reference tests below.
-        let per_slot = tab / E::slots_per_epoch();
+        let per_slot = total_active_balance / E::slots_per_epoch();
         let slots_covered = end2 - start2 + 1;
         let est = per_slot * slots_covered.as_u64();
-        assert!(est <= tab.saturating_mul(2));
+        assert!(est <= total_active_balance.saturating_mul(2));
     }
 }
 
@@ -2711,8 +2749,11 @@ async fn fcr_unit_cross_epoch_estimate_monotonic() {
         .apply_blocks(E::slots_per_epoch() as usize + 2)
         .await;
 
-    let fc = test.harness.chain.canonical_head.fork_choice_read_lock();
-    let tab = fc.fc_store().justified_balances().total_effective_balance;
+    let fork_choice = test.harness.chain.canonical_head.fork_choice_read_lock();
+    let tab = fork_choice
+        .fc_store()
+        .justified_balances()
+        .total_effective_balance;
     let current_slot = test.harness.get_current_slot();
 
     // Construct a cross-epoch span
@@ -2739,7 +2780,7 @@ async fn fcr_unit_will_current_epoch_checkpoint_be_justified_conservative_on_mis
         .apply_blocks(E::slots_per_epoch() as usize)
         .await;
 
-    let fc = test.harness.chain.canonical_head.fork_choice_read_lock();
+    let fork_choice = test.harness.chain.canonical_head.fork_choice_read_lock();
     let head = test.harness.head_block_root();
     let current_epoch = test.harness.get_current_slot().epoch(E::slots_per_epoch());
 
@@ -2769,12 +2810,12 @@ async fn fcr_unit_no_conflicting_checkpoint_boundary_guard() {
         .apply_blocks_without_new_attestations(1)
         .await;
 
-    let fc = test.harness.chain.canonical_head.fork_choice_read_lock();
-    let confirmed = fc.get_fast_confirmed_head();
+    let fork_choice = test.harness.chain.canonical_head.fork_choice_read_lock();
+    let confirmed = fork_choice.get_fast_confirmed_head();
     assert!(confirmed.is_some());
 }
 
-/// Unit: get_latest_confirmed falls back to finalized when off-canonical/too-old
+/// get_latest_confirmed falls back to finalized when off-canonical/too-old
 #[tokio::test]
 async fn fcr_unit_get_latest_confirmed_fallback() {
     let config = ChainConfig {
@@ -2785,20 +2826,20 @@ async fn fcr_unit_get_latest_confirmed_fallback() {
         .apply_blocks(E::slots_per_epoch() as usize + 1)
         .await;
 
-    let fc = test.harness.chain.canonical_head.fork_choice_read_lock();
-    let confirmed = fc.get_fast_confirmed_head();
+    let fork_choice = test.harness.chain.canonical_head.fork_choice_read_lock();
+    let confirmed = fork_choice.get_fast_confirmed_head();
     assert!(confirmed.is_some());
     // Implicitly, if confirmed was invalid/off-canonical, fallback would return finalized; we
     // check descendant relation as a safety signal
     let head = test.harness.head_block_root();
     let confirmed_root = confirmed.unwrap();
     assert!(
-        fc.is_descendant(confirmed_root, head)
+        fork_choice.is_descendant(confirmed_root, head)
             || confirmed_root == test.harness.finalized_checkpoint().root
     );
 }
 
-/// Property: Confirmed head should be monotonic along the canonical chain
+/// Confirmed head should be monotonic along the canonical chain
 proptest! {
     #[test]
     fn fcr_prop_monotonicity_across_steps(steps in 1usize..5) {
@@ -2810,8 +2851,8 @@ proptest! {
 
             let mut last = None;
             for _ in 0..steps {
-                let fc = test.harness.chain.canonical_head.fork_choice_read_lock();
-                let cur = fc.get_fast_confirmed_head();
+                let fork_choice = test.harness.chain.canonical_head.fork_choice_read_lock();
+                let current_confirmed = fork_choice.get_fast_confirmed_head();
                 if let (Some(a), Some(b)) = (last, cur) {
                     assert!(a == b || fc.is_descendant(a, b), "confirmed head should be non-decreasing");
                 }
@@ -2865,12 +2906,12 @@ async fn fcr_late_attestation_lookahead_conservative() {
         fcr_byzantine_threshold_percentage: DEFAULT_FCR_BYZANTINE_THRESHOLD_PERCENTAGE,
         ..ChainConfig::default()
     };
-    let t = ForkChoiceTest::new_with_chain_config(config)
+    let test_chain = ForkChoiceTest::new_with_chain_config(config)
         .apply_blocks(1)
         .await;
 
     // Produce an attestation for the current slot; this will be queued inside fork choice.
-    let t = t
+    let test_chain = test_chain
         .apply_attestation_to_chain(
             MutationDelay::NoDelay,
             |_, _| {},
@@ -2879,21 +2920,29 @@ async fn fcr_late_attestation_lookahead_conservative() {
         .await;
 
     // Snapshot confirmed head before the slot advances.
-    let fc_before = t.harness.chain.canonical_head.fork_choice_read_lock();
-    let c_before = fc_before.get_fast_confirmed_head();
-    drop(fc_before);
+    let fork_choice_before = test_chain
+        .harness
+        .chain
+        .canonical_head
+        .fork_choice_read_lock();
+    let confirmed_before = fork_choice_before.get_fast_confirmed_head();
+    drop(fork_choice_before);
 
     // Advance exactly one slot so queued attestations become eligible and are applied.
-    let t = t.skip_slot();
-    let fc_after = t.harness.chain.canonical_head.fork_choice_read_lock();
-    let c_after = fc_after.get_fast_confirmed_head();
+    let test_chain = test_chain.skip_slot();
+    let fork_choice_after = test_chain
+        .harness
+        .chain
+        .canonical_head
+        .fork_choice_read_lock();
+    let confirmed_after = fork_choice_after.get_fast_confirmed_head();
 
     // Confirmation should not regress and may advance, but only after the slot tick.
-    assert!(c_before.is_some());
-    assert!(c_after.is_some());
-    let c_before = c_before.unwrap();
-    let c_after = c_after.unwrap();
-    assert!(c_before == c_after || fc_after.is_descendant(c_before, c_after));
+    assert!(confirmed_before.is_some());
+    assert!(confirmed_after.is_some());
+    let c_before = confirmed_before.unwrap();
+    let c_after = confirmed_after.unwrap();
+    assert!(c_before == c_after || fork_choice_after.is_descendant(c_before, c_after));
 }
 
 /// Shallow reorgs should not break confirmation; deep reorgs should remain safe (no panic).
@@ -2905,12 +2954,12 @@ async fn fcr_reorg_depth_bounds_smoke() {
         ..ChainConfig::default()
     };
     // Build a short chain.
-    let t = ForkChoiceTest::new_with_chain_config(config)
+    let test_chain = ForkChoiceTest::new_with_chain_config(config)
         .apply_blocks(3)
         .await;
 
     // Apply a block directly with parent set to the current head's parent (create a side branch).
-    let t = t
+    let test_chain = test_chain
         .apply_block_directly_to_fork_choice(|block, state| {
             // Re-root the block to the parent's parent if available to simulate a shallow reorg branch.
             if let Ok(parent) = state.get_block_root(state.latest_block_header().slot) {
@@ -2921,13 +2970,17 @@ async fn fcr_reorg_depth_bounds_smoke() {
         .apply_blocks(1)
         .await;
 
-    let fc = t.harness.chain.canonical_head.fork_choice_read_lock();
-    let head = t.harness.head_block_root();
-    let confirmed = fc.get_fast_confirmed_head();
+    let fork_choice = test_chain
+        .harness
+        .chain
+        .canonical_head
+        .fork_choice_read_lock();
+    let head_root = test_chain.harness.head_block_root();
+    let confirmed = fork_choice.get_fast_confirmed_head();
     assert!(confirmed.is_some());
     let confirmed_root = confirmed.unwrap();
     // Confirmed should be on or behind canonical head.
-    assert!(confirmed_root == head || fc.is_descendant(confirmed_root, head));
+    assert!(confirmed_root == head_root || fork_choice.is_descendant(confirmed_root, head_root));
 }
 
 /// Pruning correctness – still returns a valid confirmed head after epochs and pruning.
@@ -2942,16 +2995,16 @@ async fn fcr_pruning_correctness_basic() {
         .apply_blocks(E::slots_per_epoch() as usize + 5)
         .await;
 
-    let fc = t.harness.chain.canonical_head.fork_choice_read_lock();
-    let head = t.harness.head_block_root();
-    let confirmed = fc.get_fast_confirmed_head();
+    let fork_choice = t.harness.chain.canonical_head.fork_choice_read_lock();
+    let head_root = t.harness.head_block_root();
+    let confirmed = fork_choice.get_fast_confirmed_head();
     assert!(confirmed.is_some());
     let confirmed_root = confirmed.unwrap();
     // Confirmed must be canonical (descendant of head) or equal.
-    assert!(fc.is_descendant(confirmed_root, head) || confirmed_root == head);
+    assert!(fork_choice.is_descendant(confirmed_root, head_root) || confirmed_root == head_root);
 }
 
-/// Property: Higher beta should reduce confirmations (be more conservative)
+/// Higher beta should reduce confirmations (be more conservative)
 proptest! {
     #[test]
     fn fcr_prop_beta_sensitivity(beta_low in 0u64..20, beta_high in 30u64..49) {
@@ -2959,30 +3012,30 @@ proptest! {
             let cfg_low = ChainConfig { fast_confirmation_enabled: true, fcr_byzantine_threshold_percentage: beta_low, ..ChainConfig::default() };
             let cfg_high = ChainConfig { fast_confirmation_enabled: true, fcr_byzantine_threshold_percentage: beta_high, ..ChainConfig::default() };
 
-            let low = ForkChoiceTest::new_with_chain_config(cfg_low)
+    let low_beta_chain = ForkChoiceTest::new_with_chain_config(cfg_low)
                 .apply_blocks(E::slots_per_epoch() as usize + 2).await;
-            let high = ForkChoiceTest::new_with_chain_config(cfg_high)
+            let high_beta_chain = ForkChoiceTest::new_with_chain_config(cfg_high)
                 .apply_blocks(E::slots_per_epoch() as usize + 2).await;
 
-            let fc_low = low.harness.chain.canonical_head.fork_choice_read_lock();
-            let fc_high = high.harness.chain.canonical_head.fork_choice_read_lock();
+            let fork_choice_low = low_beta_chain.harness.chain.canonical_head.fork_choice_read_lock();
+            let fork_choice_high = high_beta_chain.harness.chain.canonical_head.fork_choice_read_lock();
 
-            let c_low = fc_low.get_fast_confirmed_head();
-            let c_high = fc_high.get_fast_confirmed_head();
+            let confirmed_low = fork_choice_low.get_fast_confirmed_head();
+            let confirmed_high = fork_choice_high.get_fast_confirmed_head();
 
             // If both exist, the high-beta confirmed should be <= epoch of low-beta confirmed
-            if let (Some(a), Some(b)) = (c_low, c_high) {
-                let pa = fc_low.proto_array();
-                let pb = fc_high.proto_array();
-                let ea = pa.get_block(&a).unwrap().slot.epoch(E::slots_per_epoch());
-                let eb = pb.get_block(&b).unwrap().slot.epoch(E::slots_per_epoch());
-                assert!(eb <= ea);
+            if let (Some(low_root), Some(high_root)) = (confirmed_low, confirmed_high) {
+                let low_pa = fork_choice_low.proto_array();
+                let high_pa = fork_choice_high.proto_array();
+                let low_epoch = low_pa.get_block(&low_root).unwrap().slot.epoch(E::slots_per_epoch());
+                let high_epoch = high_pa.get_block(&high_root).unwrap().slot.epoch(E::slots_per_epoch());
+                assert!(high_epoch <= low_epoch);
             }
         });
     }
 }
 
-/// Property: Partial-epoch W never exceeds TAB and is ≤ adjusted estimate (checked indirectly)
+/// Partial-epoch W never exceeds TAB and is ≤ adjusted estimate (checked indirectly)
 #[tokio::test]
 async fn fcr_prop_partial_epoch_w_bounds_indirect() {
     let config = ChainConfig {
@@ -2994,7 +3047,10 @@ async fn fcr_prop_partial_epoch_w_bounds_indirect() {
         .await;
 
     let fc = test.harness.chain.canonical_head.fork_choice_read_lock();
-    let tab = fc.fc_store().justified_balances().total_effective_balance;
+    let tab = fork_choice
+        .fc_store()
+        .justified_balances()
+        .total_effective_balance;
 
     // Build a few random-ish partial ranges within current epoch
     let slot = test.harness.get_current_slot();
