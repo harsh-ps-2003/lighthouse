@@ -3388,7 +3388,7 @@ where
         //    We locate the first block with slot == epoch_start_slot by scanning forward from
         //    the previous snapshot boundary.
         let start_scan_slot = epoch_start_slot.saturating_sub(Slot::new(1));
-        if let Ok(mut iter) =
+        if let Ok(iter) =
             self.0
                 .forwards_block_roots_iterator_until(start_scan_slot, epoch_start_slot, || {
                     // Provide a hot state lazily on demand. If unavailable, error to fall through.

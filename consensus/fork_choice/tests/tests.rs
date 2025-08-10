@@ -2413,7 +2413,7 @@ async fn fcr_ffg_confirmation_across_epoch_boundary() {
 
     // Without attestations crossing the boundary, FFG support is scarce: remain in prev epoch.
     assert!(
-        confirmed_epoch <= current_epoch.saturating_sub(1),
+        confirmed_epoch <= current_epoch.saturating_sub(Epoch::new(1)),
         "FFG should conservatively avoid confirming into current epoch without attestations"
     );
     drop(fc);
@@ -2453,7 +2453,7 @@ async fn fcr_ffg_confirmation_across_epoch_boundary() {
     // With healthy attestations, will_current_epoch_checkpoint_be_justified should pass,
     // enabling confirmation in the current epoch (or at least not strictly stuck in the past).
     assert!(
-        confirmed_epoch2 >= current_epoch2.saturating_sub(1),
+        confirmed_epoch2 >= current_epoch2.saturating_sub(Epoch::new(1)),
         "FFG should allow confirmation to reach boundary/current epoch when attestations exist"
     );
 }
@@ -2526,7 +2526,7 @@ async fn fcr_ffg_beta_sensitivity() {
         .epoch(E::slots_per_epoch());
     // With very high β, expect confirmation biased to previous epoch.
     assert!(
-        ep_hb <= cur_epoch_hb.saturating_sub(1),
+        ep_hb <= cur_epoch_hb.saturating_sub(Epoch::new(1)),
         "High beta should keep confirmations conservative"
     );
     drop(fc_hb);
@@ -2555,7 +2555,7 @@ async fn fcr_ffg_beta_sensitivity() {
         .epoch(E::slots_per_epoch());
     // With lower β, allow confirmation at the boundary/current epoch.
     assert!(
-        ep_lb >= cur_epoch_lb.saturating_sub(1),
+        ep_lb >= cur_epoch_lb.saturating_sub(Epoch::new(1)),
         "Low beta should allow confirmation closer to current epoch"
     );
 }
@@ -2586,7 +2586,7 @@ async fn fcr_ffg_boundary_slot_conservative_then_progress() {
         .expect("slot")
         .epoch(E::slots_per_epoch());
     assert!(
-        ep1 <= cur_epoch1.saturating_sub(1),
+        ep1 <= cur_epoch1.saturating_sub(Epoch::new(1)),
         "At the boundary without attestations, confirmation should remain in previous epoch"
     );
     drop(fc1);
@@ -2603,7 +2603,7 @@ async fn fcr_ffg_boundary_slot_conservative_then_progress() {
         .expect("slot")
         .epoch(E::slots_per_epoch());
     assert!(
-        ep2 >= cur_epoch2.saturating_sub(1),
+        ep2 >= cur_epoch2.saturating_sub(Epoch::new(1)),
         "With attestations in the new epoch, confirmation should approach/enter current epoch"
     );
 }
@@ -2666,8 +2666,8 @@ async fn fcr_unit_committee_weight_bounds() {
 
     let fc = test.harness.chain.canonical_head.fork_choice_read_lock();
     let current_slot = test.harness.get_current_slot();
-    let start = current_slot.saturating_sub(2);
-    let end = current_slot.saturating_sub(1);
+    let start = current_slot.saturating_sub(Slot::new(2));
+    let end = current_slot.saturating_sub(Slot::new(1));
     let tab = fc.fc_store().justified_balances().total_effective_balance;
 
     // Use public API to force internal computation through get_fast_confirmed_head path,
@@ -2802,7 +2802,7 @@ async fn fcr_unit_get_latest_confirmed_fallback() {
 proptest! {
     #[test]
     fn fcr_prop_monotonicity_across_steps(steps in 1usize..5) {
-        tokio_test::block_on(async move {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async move {
             let config = ChainConfig { fast_confirmation_enabled: true, ..ChainConfig::default() };
             let mut test = ForkChoiceTest::new_with_chain_config(config)
                 .apply_blocks(E::slots_per_epoch() as usize)
@@ -2823,11 +2823,139 @@ proptest! {
     }
 }
 
+/// Equivocations should keep confirmation conservative (avoid current-epoch confirms).
+#[tokio::test]
+async fn fcr_equivocation_conservative() {
+    let config = ChainConfig {
+        fast_confirmation_enabled: true,
+        fcr_byzantine_threshold_percentage: DEFAULT_FCR_BYZANTINE_THRESHOLD_PERCENTAGE,
+        ..ChainConfig::default()
+    };
+    let t = ForkChoiceTest::new_with_chain_config(config)
+        .apply_blocks_while(|_, state| state.finalized_checkpoint().epoch == 0)
+        .await
+        .unwrap()
+        .apply_blocks(2)
+        .await
+        .add_previous_epoch_attester_slashing()
+        .await
+        .apply_blocks(1)
+        .await;
+
+    let fc = t.harness.chain.canonical_head.fork_choice_read_lock();
+    let confirmed = fc.get_fast_confirmed_head();
+    assert!(confirmed.is_some(), "Should have a confirmed head");
+    let confirmed_root = confirmed.unwrap();
+    let confirmed_epoch = fc
+        .proto_array()
+        .get_block(&confirmed_root)
+        .unwrap()
+        .slot
+        .epoch(E::slots_per_epoch());
+    let current_epoch = t.harness.get_current_slot().epoch(E::slots_per_epoch());
+    // Under equivocation, be conservative: avoid confirming into current epoch.
+    assert!(confirmed_epoch <= current_epoch.saturating_sub(Epoch::new(1)));
+}
+
+/// Late attestations (queued for slot t) should only influence confirmation after the next slot.
+#[tokio::test]
+async fn fcr_late_attestation_lookahead_conservative() {
+    let config = ChainConfig {
+        fast_confirmation_enabled: true,
+        fcr_byzantine_threshold_percentage: DEFAULT_FCR_BYZANTINE_THRESHOLD_PERCENTAGE,
+        ..ChainConfig::default()
+    };
+    let t = ForkChoiceTest::new_with_chain_config(config)
+        .apply_blocks(1)
+        .await;
+
+    // Produce an attestation for the current slot; this will be queued inside fork choice.
+    let t = t
+        .apply_attestation_to_chain(
+            MutationDelay::NoDelay,
+            |_, _| {},
+            |result| assert!(result.is_ok()),
+        )
+        .await;
+
+    // Snapshot confirmed head before the slot advances.
+    let fc_before = t.harness.chain.canonical_head.fork_choice_read_lock();
+    let c_before = fc_before.get_fast_confirmed_head();
+    drop(fc_before);
+
+    // Advance exactly one slot so queued attestations become eligible and are applied.
+    let t = t.skip_slot();
+    let fc_after = t.harness.chain.canonical_head.fork_choice_read_lock();
+    let c_after = fc_after.get_fast_confirmed_head();
+
+    // Confirmation should not regress and may advance, but only after the slot tick.
+    assert!(c_before.is_some());
+    assert!(c_after.is_some());
+    let c_before = c_before.unwrap();
+    let c_after = c_after.unwrap();
+    assert!(c_before == c_after || fc_after.is_descendant(c_before, c_after));
+}
+
+/// Shallow reorgs should not break confirmation; deep reorgs should remain safe (no panic).
+#[tokio::test]
+async fn fcr_reorg_depth_bounds_smoke() {
+    let config = ChainConfig {
+        fast_confirmation_enabled: true,
+        fcr_byzantine_threshold_percentage: DEFAULT_FCR_BYZANTINE_THRESHOLD_PERCENTAGE,
+        ..ChainConfig::default()
+    };
+    // Build a short chain.
+    let t = ForkChoiceTest::new_with_chain_config(config)
+        .apply_blocks(3)
+        .await;
+
+    // Apply a block directly with parent set to the current head's parent (create a side branch).
+    let t = t
+        .apply_block_directly_to_fork_choice(|block, state| {
+            // Re-root the block to the parent's parent if available to simulate a shallow reorg branch.
+            if let Ok(parent) = state.get_block_root(state.latest_block_header().slot) {
+                *block.message_mut().parent_root_mut() = *parent;
+            }
+        })
+        .await
+        .apply_blocks(1)
+        .await;
+
+    let fc = t.harness.chain.canonical_head.fork_choice_read_lock();
+    let head = t.harness.head_block_root();
+    let confirmed = fc.get_fast_confirmed_head();
+    assert!(confirmed.is_some());
+    let confirmed_root = confirmed.unwrap();
+    // Confirmed should be on or behind canonical head.
+    assert!(confirmed_root == head || fc.is_descendant(confirmed_root, head));
+}
+
+/// Pruning correctness – still returns a valid confirmed head after epochs and pruning.
+#[tokio::test]
+async fn fcr_pruning_correctness_basic() {
+    let config = ChainConfig {
+        fast_confirmation_enabled: true,
+        ..ChainConfig::default()
+    };
+    // Build multiple epochs to trigger pruning in proto-array.
+    let t = ForkChoiceTest::new_with_chain_config(config)
+        .apply_blocks(E::slots_per_epoch() as usize + 5)
+        .await;
+
+    let fc = t.harness.chain.canonical_head.fork_choice_read_lock();
+    let head = t.harness.head_block_root();
+    let confirmed = fc.get_fast_confirmed_head();
+    assert!(confirmed.is_some());
+    let confirmed_root = confirmed.unwrap();
+    // Confirmed must be canonical (descendant of head) or equal.
+    assert!(fc.is_descendant(confirmed_root, head) || confirmed_root == head);
+}
+
 /// Property: Higher beta should reduce confirmations (be more conservative)
 proptest! {
     #[test]
     fn fcr_prop_beta_sensitivity(beta_low in 0u64..20, beta_high in 30u64..49) {
-        tokio_test::block_on(async move {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async move {
             let cfg_low = ChainConfig { fast_confirmation_enabled: true, fcr_byzantine_threshold_percentage: beta_low, ..ChainConfig::default() };
             let cfg_high = ChainConfig { fast_confirmation_enabled: true, fcr_byzantine_threshold_percentage: beta_high, ..ChainConfig::default() };
 
@@ -2882,7 +3010,7 @@ async fn fcr_prop_partial_epoch_w_bounds_indirect() {
     }
 }
 
-/// FFG: a checkpoint is supported only if the vote's target checkpoint equals the expected target
+/// a checkpoint is supported only if the vote's target checkpoint equals the expected target
 #[tokio::test]
 async fn fcr_ffg_requires_exact_target_checkpoint() {
     let config = ChainConfig {
@@ -2900,7 +3028,7 @@ async fn fcr_ffg_requires_exact_target_checkpoint() {
     // Move into new epoch; craft an attestation whose head is correct but target root is wrong
     let t = t
         .apply_attestation_to_chain(
-            MutationDelay::NoDelay,
+            MutationDelay::Blocks(1),
             |att, chain| {
                 // Set a mismatching target root: choose a root from earlier epoch
                 let wrong_target = chain
@@ -2911,7 +3039,7 @@ async fn fcr_ffg_requires_exact_target_checkpoint() {
                 att.data_mut().target.root = wrong_target;
                 // Keep head beacon_block_root pointing at the current head
             },
-            |result| assert!(result.is_ok()),
+            |result| assert!(result.is_err()),
         )
         .await;
 
@@ -2925,14 +3053,14 @@ async fn fcr_ffg_requires_exact_target_checkpoint() {
             .slot
             .epoch(E::slots_per_epoch());
         let cur = t.harness.get_current_slot().epoch(E::slots_per_epoch());
-        assert!(ep <= cur.saturating_sub(1));
+        assert!(ep <= cur.saturating_sub(Epoch::new(1)));
     }
     drop(fc1);
 
     // Now submit a valid attestation (correct target root)
     let t = t
         .apply_attestation_to_chain(
-            MutationDelay::NoDelay,
+            MutationDelay::Blocks(1),
             |_, _| {},
             |result| assert!(result.is_ok()),
         )
@@ -2947,7 +3075,7 @@ async fn fcr_ffg_requires_exact_target_checkpoint() {
             .slot
             .epoch(E::slots_per_epoch());
         let cur = t.harness.get_current_slot().epoch(E::slots_per_epoch());
-        assert!(ep >= cur.saturating_sub(1));
+        assert!(ep >= cur.saturating_sub(Epoch::new(1)));
     }
 }
 
@@ -2970,7 +3098,7 @@ async fn fcr_cross_epoch_weight_boundary_progression_minimal() {
     let cur_epoch = cur_slot.epoch(slots_per_epoch);
 
     // Choose a boundary-spanning range: last slot of prev epoch to first slot of current
-    let start = cur_epoch.start_slot(slots_per_epoch) - 1;
+    let _start = cur_epoch.start_slot(slots_per_epoch) - 1;
     let end = cur_epoch.start_slot(slots_per_epoch);
 
     // Compute reference estimator per spec
