@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 use types::{
     BeaconState, ChainSpec, Checkpoint, Epoch, EthSpec, FixedBytesExtended, Hash256, Slot,
 };
@@ -64,12 +65,12 @@ pub trait StateProvider<E: EthSpec> {
     /// * `checkpoint` - The checkpoint to get the state for
     ///
     /// # Returns
-    /// * `Ok(Option<&BeaconState<E>>)` - The checkpoint state if available
+    /// * `Ok(Option<Arc<BeaconState<E>>>)` - The checkpoint state if available
     /// * `Err(Self::Error)` - Error occurred during state access
     fn get_checkpoint_state(
         &self,
         checkpoint: &Checkpoint,
-    ) -> Result<Option<&BeaconState<E>>, Self::Error>;
+    ) -> Result<Option<Arc<BeaconState<E>>>, Self::Error>;
 
     /// Gets the total active balance at a given epoch.
     ///
@@ -638,14 +639,13 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             .ok()
             .flatten();
 
-        // Get LMD-GHOST support weight (S) from proto array WITHOUT proposer boost
-        // Supply the weighting checkpoint state if available per spec.
-        // Note: proto_array.get_weight currently ignores the optional checkpoint_state
-        // (argument named `_checkpoint_state`). We therefore pass `None` here and rely on
-        // the weighting checkpoint state only for W (maximum support) per spec update.
+        // Get LMD-GHOST support weight (S) from proto array WITHOUT proposer boost.
+        // Pass the weighting checkpoint state to align with the spec signature. The
+        // ProtoArray implementation will currently ignore it, but this preserves API
+        // compatibility and allows future refinement without changing FCR.
         let Some(support) = proto_array.get_weight::<E>(
             &block_root,
-            None,
+            weighting_checkpoint_state_opt.as_deref(),
             false, // FCR doesn't want proposer boost included in support
             fc_store.proposer_boost_root(),
             fc_store.chain_spec(),
@@ -900,11 +900,27 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         }
 
         // Second condition: Current epoch advancement
-        if fc_store.get_current_slot() % E::slots_per_epoch() == 0
-            || self
-                .check_unrealized_justification_conditions(fc_store)
-                .unwrap_or(false)
-        {
+        if fc_store.get_current_slot() % E::slots_per_epoch() == 0 || {
+            // Stricter unrealized-justification gate per Python spec:
+            // require that either prev_slot_head or head has an unrealized justification epoch
+            // at least current_epoch - 1.
+            let current_epoch = fc_store.get_current_slot().epoch(E::slots_per_epoch());
+            let head = head_root;
+            let prev_head = self.fcr_store.prev_slot_head;
+            let cond_prev = self
+                .get_unrealized_justification_epoch(proto_array, prev_head)
+                .ok()
+                .flatten()
+                .map(|e| e + 1 >= current_epoch)
+                .unwrap_or(false);
+            let cond_head = self
+                .get_unrealized_justification_epoch(proto_array, head)
+                .ok()
+                .flatten()
+                .map(|e| e + 1 >= current_epoch)
+                .unwrap_or(false);
+            cond_prev || cond_head
+        } {
             if let Some(new_confirmed) =
                 self.try_advance_current_epoch(confirmed_root, proto_array, fc_store, head_root)
             {
@@ -1026,6 +1042,23 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         let unrealized_justified_epoch = fc_store.unrealized_justified_checkpoint().epoch;
 
         Ok(unrealized_justified_epoch + 1 >= current_epoch)
+    }
+
+    /// Returns the unrealized justification epoch for a given block if available.
+    fn get_unrealized_justification_epoch(
+        &self,
+        proto_array: &ProtoArrayForkChoice,
+        block_root: Hash256,
+    ) -> Result<Option<Epoch>, crate::Error<String>> {
+        let Some(block) = proto_array.get_block(&block_root) else {
+            return Err(ProtoArrayStringError(
+                "Block not found while reading unrealized justification".to_string(),
+            ));
+        };
+        Ok(block
+            .unrealized_justified_checkpoint
+            .as_ref()
+            .map(|cp| cp.epoch))
     }
 
     /// Advances confirmation through the canonical chain for previous epoch blocks.
@@ -1537,21 +1570,19 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             }
         };
 
-        let total_active_balance = self
-            .state_provider
-            .get_total_active_balance_at_epoch(current_epoch)
-            .map_err(|_| {
-                crate::Error::ProtoArrayStringError(
-                    "Failed to get total active balance".to_string(),
-                )
-            })?;
+        // Use TAB from the checkpoint state to avoid extra provider lookups
+        let total_active_balance = checkpoint_state.get_total_active_balance().map_err(|_| {
+            crate::Error::ProtoArrayStringError(
+                "Failed to get total active balance from checkpoint state".to_string(),
+            )
+        })?;
 
         // Calculate FFG support for the checkpoint using the checkpoint state
         let ffg_support_for_checkpoint = self.get_checkpoint_weight_with_state(
             proto_array,
             checkpoint,
             fc_store,
-            checkpoint_state,
+            checkpoint_state.as_ref(),
         )?;
 
         // Calculate total FFG weight till current slot
@@ -1637,21 +1668,19 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             }
         };
 
-        let total_active_balance = self
-            .state_provider
-            .get_total_active_balance_at_epoch(current_epoch)
-            .map_err(|_| {
-                crate::Error::ProtoArrayStringError(
-                    "Failed to get total active balance".to_string(),
-                )
-            })?;
+        // Use TAB from the checkpoint state to avoid extra provider lookups.
+        let total_active_balance = checkpoint_state.get_total_active_balance().map_err(|_| {
+            crate::Error::ProtoArrayStringError(
+                "Failed to get total active balance from checkpoint state".to_string(),
+            )
+        })?;
 
         // Calculate FFG support for the checkpoint using the checkpoint state
         let ffg_support_for_checkpoint = self.get_checkpoint_weight_with_state(
             proto_array,
             &checkpoint,
             fc_store,
-            checkpoint_state,
+            checkpoint_state.as_ref(),
         )?;
 
         // Calculate total FFG weight till current slot
