@@ -374,7 +374,7 @@ impl ForkChoiceTest {
         let state_root = harness
             .chain
             .store
-            .get_blinded_block(&fc.fc_store().justified_checkpoint().root)
+            .get_blinded_block(&fork_choice.fc_store().justified_checkpoint().root)
             .unwrap()
             .unwrap()
             .message()
@@ -2785,10 +2785,10 @@ async fn fcr_unit_will_current_epoch_checkpoint_be_justified_conservative_on_mis
     let current_epoch = test.harness.get_current_slot().epoch(E::slots_per_epoch());
 
     // If internals cannot source a checkpoint state, confirmation should remain conservative.
-    let confirmed = fc.get_fast_confirmed_head();
+    let confirmed = fork_choice.get_fast_confirmed_head();
     assert!(confirmed.is_some());
     let confirmed_root = confirmed.unwrap();
-    let proto = fc.proto_array();
+    let proto = fork_choice.proto_array();
     let confirmed_epoch = proto
         .get_block(&confirmed_root)
         .unwrap()
@@ -2853,11 +2853,11 @@ proptest! {
             for _ in 0..steps {
                 let fork_choice = test.harness.chain.canonical_head.fork_choice_read_lock();
                 let current_confirmed = fork_choice.get_fast_confirmed_head();
-                if let (Some(a), Some(b)) = (last, cur) {
-                    assert!(a == b || fc.is_descendant(a, b), "confirmed head should be non-decreasing");
+                if let (Some(a), Some(b)) = (last, current_confirmed) {
+                    assert!(a == b || fork_choice.is_descendant(a, b), "confirmed head should be non-decreasing");
                 }
-                last = cur;
-                drop(fc);
+                last = current_confirmed;
+                drop(fork_choice);
                 test = test.apply_blocks(1).await;
             }
         });
@@ -3047,10 +3047,7 @@ async fn fcr_prop_partial_epoch_w_bounds_indirect() {
         .await;
 
     let fc = test.harness.chain.canonical_head.fork_choice_read_lock();
-    let tab = fork_choice
-        .fc_store()
-        .justified_balances()
-        .total_effective_balance;
+    let tab = fc.fc_store().justified_balances().total_effective_balance;
 
     // Build a few random-ish partial ranges within current epoch
     let slot = test.harness.get_current_slot();
