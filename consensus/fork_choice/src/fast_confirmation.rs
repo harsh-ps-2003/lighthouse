@@ -16,6 +16,7 @@ use std::error::Error;
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use tracing::{debug, info, warn};
 use types::{
     BeaconState, ChainSpec, Checkpoint, Epoch, EthSpec, FixedBytesExtended, Hash256, Slot,
 };
@@ -241,6 +242,11 @@ pub struct FastConfirmation<E: EthSpec, S: StateProvider<E>> {
 impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     /// Creates a new Fast Confirmation Rule instance.
     pub fn new(config: FastConfirmationConfig, state_provider: S) -> Self {
+        info!(
+            beta = config.beta_percentage,
+            slashing = config.slashing_percentage,
+            "Fast Confirmation Rule enabled"
+        );
         Self {
             config,
             meta: HashMap::new(),
@@ -408,7 +414,11 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     where
         T: ForkChoiceStore<E>,
     {
-        // Call the main update method
+        debug!(
+            slot = fc_store.get_current_slot().as_u64(),
+            head = %head_root,
+            "FCR on_new_slot"
+        );
         self.update_per_slot(proto_array, fc_store, head_root)
     }
 
@@ -484,11 +494,21 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 || !proto_array.is_descendant(confirmed_root, head_root)
             {
                 // Fallback to finalized checkpoint for safety
-                return Some(fc_store.finalized_checkpoint().root);
+                let finalized = fc_store.finalized_checkpoint().root;
+                warn!(
+                    current_epoch = current_epoch.as_u64(),
+                    confirmed = %confirmed_root,
+                    finalized = %finalized,
+                    head = %head_root,
+                    "FCR: falling back to finalized checkpoint for safety"
+                );
+                return Some(finalized);
             }
         } else {
             // Confirmed block not found in proto array, fallback to finalized
-            return Some(fc_store.finalized_checkpoint().root);
+            let finalized = fc_store.finalized_checkpoint().root;
+            warn!(confirmed_missing = %confirmed_root, finalized = %finalized, "FCR: confirmed root missing, using finalized");
+            return Some(finalized);
         }
 
         // Try to advance the confirmed root along the canonical chain
@@ -496,6 +516,14 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         if let Some(new_confirmed) =
             self.find_latest_confirmed_descendant(confirmed_root, proto_array, fc_store, head_root)
         {
+            if new_confirmed != confirmed_root {
+                info!(
+                    old = %confirmed_root,
+                    new = %new_confirmed,
+                    head = %head_root,
+                    "FCR: advanced latest confirmed descendant"
+                );
+            }
             confirmed_root = new_confirmed;
         }
 
@@ -538,11 +566,13 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         let mut current_root = head_root;
         let mut depth = 0;
 
+        let mut found_confirmed: Option<Hash256> = None;
         while depth < MAX_REORG_DEPTH {
             // Check if this block is already confirmed
             if let Some(meta) = self.meta.get(&current_root) {
                 if meta.confirmed {
                     // Found a confirmed ancestor, no need to scan further
+                    found_confirmed = Some(current_root);
                     break;
                 }
             }
@@ -551,6 +581,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             if self.is_one_confirmed(current_root, proto_array, fc_store)? {
                 // Mark this block and all its descendants as confirmed
                 self.mark_confirmed(current_root, proto_array);
+                found_confirmed = Some(current_root);
                 break;
             }
 
@@ -566,6 +597,15 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             } else {
                 // Reached end of chain
                 break;
+            }
+        }
+
+        match found_confirmed {
+            Some(root) => {
+                debug!(head = %head_root, confirmed_ancestor = %root, depth, "FCR update_after_find_head: confirmed ancestor")
+            }
+            None => {
+                debug!(head = %head_root, depth, "FCR update_after_find_head: no confirmed ancestor within depth")
             }
         }
 
@@ -1745,6 +1785,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             ));
         };
 
+        let before = self.meta.len();
         // Remove FCR metadata for blocks that are no longer in the proto array
         // or are before the finalized block
         self.meta.retain(|block_root, _| {
@@ -1766,6 +1807,14 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         // Note: LRU caches handle their own eviction, but we can clear very old entries
         // that are definitely no longer needed
         self.fcr_store.committee_weight_lru.clear();
+
+        let after = self.meta.len();
+        debug!(
+            finalized = %finalized_root,
+            pruned = (before as i64 - after as i64),
+            remaining = after,
+            "FCR: pruned side-table metadata"
+        );
 
         Ok(())
     }
