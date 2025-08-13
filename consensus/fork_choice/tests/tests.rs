@@ -2509,11 +2509,15 @@ async fn fcr_ffg_weight_progression_sanity() {
     let s1 = pa.get_block(&c1).unwrap().slot;
     let s2 = pa.get_block(&c2).unwrap().slot;
     if s2 < s1 {
-        // Allowed only if safety fallback to finalized triggered in between
+        // Allowed only if safety fallback to finalized or epoch-start uplift to UJ happened
         let finalized_root = test.harness.finalized_checkpoint().root;
-        assert_eq!(
-            c2, finalized_root,
-            "slot decrease only allowed on fallback to finalized"
+        let uj_root = fork_choice_after
+            .fc_store()
+            .unrealized_justified_checkpoint()
+            .root;
+        assert!(
+            c2 == finalized_root || c2 == uj_root,
+            "slot decrease only allowed on fallback to finalized or uplift to UJ"
         );
     }
 }
