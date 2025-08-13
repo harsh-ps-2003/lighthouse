@@ -1088,36 +1088,6 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             .epoch)
     }
 
-    /// Checks unrealized justification conditions for confirmation advancement.
-    ///
-    /// **Python Specification**: Part of `find_latest_confirmed_descendant()` logic
-    ///
-    /// This function checks if the unrealized justification conditions are met
-    /// for advancing confirmation. It ensures that the unrealized justified
-    /// checkpoint is properly set and recent enough.
-    ///
-    /// # Arguments
-    /// * `fc_store` - The fork choice store containing current state
-    ///
-    /// # Returns
-    /// * `Ok(bool)` - True if unrealized justification conditions are met
-    /// * `Err(Error)` - Error occurred during check
-    fn check_unrealized_justification_conditions<T>(
-        &self,
-        fc_store: &T,
-    ) -> Result<bool, crate::Error<T::Error>>
-    where
-        T: ForkChoiceStore<E>,
-    {
-        let current_epoch = fc_store.get_current_slot().epoch(E::slots_per_epoch());
-
-        // Check if the unrealized justified checkpoint is recent enough
-        // This ensures that the unrealized justification is from a recent epoch
-        let unrealized_justified_epoch = fc_store.unrealized_justified_checkpoint().epoch;
-
-        Ok(unrealized_justified_epoch + 1 >= current_epoch)
-    }
-
     /// Returns the unrealized justification epoch for a given block if available.
     fn get_unrealized_justification_epoch(
         &self,
@@ -1528,42 +1498,6 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         }
 
         Ok(checkpoint_weight)
-    }
-
-    /// Checks if a validator's vote supports a checkpoint.
-    ///
-    /// **Python Specification**: Helper function used by `get_checkpoint_weight()`
-    ///
-    /// This function determines if a validator's LMD-GHOST vote implicitly supports
-    /// a given FFG checkpoint. A validator voting for a block descended from a checkpoint
-    /// implicitly supports that checkpoint.
-    ///
-    /// # Arguments
-    /// * `proto_array` - The proto array containing the block DAG
-    /// * `validator_index` - The validator index
-    /// * `vote_root` - The block root the validator voted for
-    /// * `vote_epoch` - The epoch of the validator's vote
-    /// * `checkpoint` - The checkpoint to check support for
-    ///
-    /// # Returns
-    /// * `Ok(bool)` - True if the validator's vote supports the checkpoint
-    /// * `Err(Error)` - Error occurred during check
-    fn validator_vote_supports_checkpoint(
-        &self,
-        proto_array: &ProtoArrayForkChoice,
-        _validator_index: usize,
-        vote_root: Hash256,
-        vote_epoch: Epoch,
-        checkpoint: &Checkpoint,
-    ) -> Result<bool, crate::Error<String>> {
-        // Check if the vote epoch matches the checkpoint epoch
-        if vote_epoch != checkpoint.epoch {
-            return Ok(false);
-        }
-
-        // Check if the voted block is descended from the checkpoint block
-        // This means the validator implicitly supports the checkpoint
-        Ok(proto_array.is_descendant(checkpoint.root, vote_root))
     }
 
     /// Gets the FFG weight up to a specific slot.
