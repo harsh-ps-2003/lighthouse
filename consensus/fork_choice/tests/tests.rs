@@ -3018,35 +3018,29 @@ async fn fcr_epoch_start_uplift_promotes_prev_uj() {
         .apply_blocks(E::slots_per_epoch() as usize - 1)
         .await;
 
-    // Produce the last block of the epoch; then advance one slot to enter new epoch
+    // Produce the last block of the epoch, then advance into the next epoch
     let test = test.apply_blocks(1).await; // last slot of previous epoch
-    let prev_epoch_last_slot = test.harness.get_current_slot().saturating_sub(Slot::new(1));
-
-    // Enter next epoch (slot tick and block)
-    let test = test.apply_blocks(1).await;
+    let test = test.apply_blocks(1).await; // first slot of next epoch
 
     let fc = test.harness.chain.canonical_head.fork_choice_read_lock();
     let confirmed = fc.get_fast_confirmed_head().expect("confirmed head");
     let proto = fc.proto_array();
+    let prev_uj = *fc.fc_store().unrealized_justified_checkpoint();
 
-    // Expect uplift to the prev-epoch last block if it is later than prior confirmed
-    let expected_prev_epoch_root = test
-        .harness
-        .chain
-        .block_at_slot(prev_epoch_last_slot, WhenSlotSkipped::Prev)
-        .unwrap()
-        .unwrap()
-        .canonical_root();
+    // Expect uplift to the prev-slot unrealized justified checkpoint root
+    let prev_uj_slot = proto
+        .get_block(&prev_uj.root)
+        .expect("prev UJ block exists")
+        .slot;
     let confirmed_slot = proto.get_block(&confirmed).expect("confirmed exists").slot;
-    let expected_slot = prev_epoch_last_slot;
     assert_eq!(
-        confirmed_slot, expected_slot,
-        "epoch-start uplift to prev UJ"
+        confirmed_slot, prev_uj_slot,
+        "epoch-start uplift to prev UJ slot"
     );
-    // Sanity: the confirmed root should match that block's root or be a descendant at the same slot
-    let confirmed_is_expected = confirmed == expected_prev_epoch_root
-        || proto.get_block(&confirmed).map(|n| n.slot) == Some(expected_slot);
-    assert!(confirmed_is_expected);
+    assert_eq!(
+        confirmed, prev_uj.root,
+        "epoch-start uplift to prev UJ root"
+    );
 }
 
 /// Epoch-start uplift should not promote if the prev-slot unrealized justified checkpoint

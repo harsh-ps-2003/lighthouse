@@ -484,16 +484,14 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         let mut confirmed_root = self.fcr_store.confirmed_root;
         let current_epoch = fc_store.get_current_slot().epoch(E::slots_per_epoch());
 
-        // Safety check: revert to finalized block if confirmed block is too old
-        // or doesn't belong to canonical chain (equivalent to Python spec's safety checks)
+        // Safety check: if confirmed is missing/too-old/off-canonical, revert to finalized but
+        // DO NOT return early; continue with epoch-start uplift and advancement as per spec.
         if let Some(confirmed_block) = proto_array.get_block(&confirmed_root) {
             let confirmed_block_epoch = confirmed_block.slot.epoch(E::slots_per_epoch());
 
-            // Check if confirmed block is from 2+ epochs ago or not in canonical chain
             if confirmed_block_epoch + 1 < current_epoch
                 || !proto_array.is_descendant(confirmed_root, head_root)
             {
-                // Fallback to finalized checkpoint for safety
                 let finalized = fc_store.finalized_checkpoint().root;
                 warn!(
                     current_epoch = current_epoch.as_u64(),
@@ -502,13 +500,16 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                     head = %head_root,
                     "FCR: falling back to finalized checkpoint for safety"
                 );
-                return Some(finalized);
+                confirmed_root = finalized;
             }
         } else {
-            // Confirmed block not found in proto array, fallback to finalized
             let finalized = fc_store.finalized_checkpoint().root;
-            warn!(confirmed_missing = %confirmed_root, finalized = %finalized, "FCR: confirmed root missing, using finalized");
-            return Some(finalized);
+            warn!(
+                confirmed_missing = %confirmed_root,
+                finalized = %finalized,
+                "FCR: confirmed root missing, using finalized"
+            );
+            confirmed_root = finalized;
         }
 
         // At the start of an epoch, if the prev-slot unrealized justified checkpoint
