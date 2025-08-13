@@ -513,7 +513,8 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
 
         // At the start of an epoch, if the prev-slot unrealized justified checkpoint
         // belongs to the previous epoch and is later than the current confirmed,
-        // promote confirmed to that checkpoint (spec-aligned safety uplift)
+        // promote confirmed to that checkpoint (spec-aligned safety uplift),
+        // then continue to attempt further advancement below.
         if fc_store.get_current_slot() % E::slots_per_epoch() == 0 {
             let prev_uj = *fc_store.unrealized_justified_checkpoint();
             let prev_uj_epoch = prev_uj.epoch;
@@ -523,7 +524,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                     proto_array.get_block(&prev_uj.root),
                 ) {
                     if confirmed_block.slot < prev_uj_block.slot {
-                        return Some(prev_uj.root);
+                        confirmed_root = prev_uj.root;
                     }
                 }
             }
