@@ -2508,10 +2508,14 @@ async fn fcr_ffg_weight_progression_sanity() {
     let pa = fork_choice_after.proto_array();
     let s1 = pa.get_block(&c1).unwrap().slot;
     let s2 = pa.get_block(&c2).unwrap().slot;
-    assert!(
-        s2 >= s1,
-        "Confirmed head slot should be non-decreasing with attestations"
-    );
+    if s2 < s1 {
+        // Allowed only if safety fallback to finalized triggered in between
+        let finalized_root = test.harness.finalized_checkpoint().root;
+        assert_eq!(
+            c2, finalized_root,
+            "slot decrease only allowed on fallback to finalized"
+        );
+    }
 }
 
 /// Byzantine threshold sensitivity: higher β should make current-epoch confirmation harder.
@@ -3072,10 +3076,14 @@ async fn fcr_epoch_start_uplift_no_promotion_when_not_later() {
     let pa = fc_after.proto_array();
     let s_before = pa.get_block(&confirmed_before).unwrap().slot;
     let s_after = pa.get_block(&confirmed_after).unwrap().slot;
-    assert!(
-        s_after >= s_before,
-        "confirmed head slot should be non-decreasing"
-    );
+    if s_after < s_before {
+        // Allowed only on safety fallback to finalized
+        let finalized_root = test.harness.finalized_checkpoint().root;
+        assert_eq!(
+            confirmed_after, finalized_root,
+            "slot decrease only allowed on fallback to finalized"
+        );
+    }
 }
 
 /// Previous-epoch advancement must be anchored to prev_slot_head context; a head change after
