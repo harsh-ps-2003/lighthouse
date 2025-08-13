@@ -516,7 +516,8 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         // promote confirmed to that checkpoint (spec-aligned safety uplift),
         // then continue to attempt further advancement below.
         if fc_store.get_current_slot() % E::slots_per_epoch() == 0 {
-            let prev_uj = *fc_store.unrealized_justified_checkpoint();
+            // Use the prev-slot unrealized justified checkpoint per spec
+            let prev_uj = self.fcr_store.prev_slot_unrealized_justified_checkpoint;
             let prev_uj_epoch = prev_uj.epoch;
             if prev_uj_epoch + 1 == current_epoch {
                 if let (Some(confirmed_block), Some(prev_uj_block)) = (
@@ -637,6 +638,10 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     ///
     /// This implements the core FCR Q-indicator check: `2 * S > W * (1 + 2 * β / 100) + proposer_score`
     /// where S is support weight, W is committee weight, and β is the Byzantine threshold.
+    ///
+    /// Per spec, this function performs ONLY the LMD-GHOST inequality without any
+    /// FFG gating. FFG-related checks are handled in the advancement logic
+    /// (`find_latest_confirmed_descendant`)
     ///
     /// # Arguments
     /// * `block_root` - The block root to check for confirmation
@@ -777,36 +782,20 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         // Check LMD-GHOST confirmation (Q-indicator)
         let lmd_confirmed = left_side > right_side;
 
-        if !lmd_confirmed {
-            return Ok(false);
-        }
+        debug!(
+            block = %block_root,
+            support = support,
+            committee_weight = committee_weight,
+            proposer_score = proposer_score,
+            beta = beta_threshold,
+            left = left_side,
+            right = right_side,
+            passed = lmd_confirmed,
+            "FCR is_one_confirmed LMD check"
+        );
 
-        // Check FFG confirmation (checkpoint justification)
-        // Get the checkpoint for this block's epoch
-        let block_epoch = block.slot.epoch(E::slots_per_epoch());
-
-        let current_epoch = fc_store.get_current_slot().epoch(E::slots_per_epoch());
-
-        // Use current_epoch for epoch boundary checks
-        if block_epoch > current_epoch {
-            // Block is from a future epoch, cannot be confirmed yet
-            return Ok(false);
-        }
-
-        let checkpoint_root = self
-            .get_checkpoint_block(proto_array, block_root, block_epoch)
-            .unwrap_or(block_root); // Fallback to block root if no checkpoint block found
-
-        let checkpoint = Checkpoint {
-            epoch: block_epoch,
-            root: checkpoint_root,
-        };
-
-        // Check if the checkpoint will be justified using FFG analysis
-        let ffg_confirmed =
-            self.will_checkpoint_be_justified(proto_array, fc_store, &checkpoint)?;
-
-        Ok(lmd_confirmed && ffg_confirmed)
+        // Per spec, do not apply FFG gating here. Return LMD result only.
+        Ok(lmd_confirmed)
     }
 
     /// Marks a block and all its descendants as confirmed.
@@ -938,310 +927,214 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         let confirmed_block_epoch = confirmed_block.slot.epoch(E::slots_per_epoch());
 
         // First condition: Previous epoch advancement
-        if confirmed_block_epoch + 1 == current_epoch
-            && self
-                .check_voting_source_conditions(proto_array, fc_store, head_root)
-                .unwrap_or(false)
-            && {
-                // boundary OR (no_conflict AND (uj_prev OR uj_head))
-                let boundary = fc_store.get_current_slot() % E::slots_per_epoch() == 0;
-                let no_conflict = self
-                    .will_no_conflicting_checkpoint_be_justified(proto_array, fc_store, head_root)
-                    .unwrap_or(false);
-                let uj_prev = self
-                    .get_unrealized_justification_epoch(proto_array, self.fcr_store.prev_slot_head)
-                    .ok()
-                    .flatten()
-                    .map(|e| e + 1 >= current_epoch)
-                    .unwrap_or(false);
-                let uj_head = self
-                    .get_unrealized_justification_epoch(proto_array, head_root)
-                    .ok()
-                    .flatten()
-                    .map(|e| e + 1 >= current_epoch)
-                    .unwrap_or(false);
-                boundary || (no_conflict && (uj_prev || uj_head))
-            }
-        {
-            // Advance through canonical chain for previous epoch blocks
-            if let Some(new_confirmed) = self.advance_through_canonical_chain(
-                confirmed_root,
-                proto_array,
-                fc_store,
-                head_root,
-            ) {
-                confirmed_root = new_confirmed;
+        if confirmed_block_epoch + 1 == current_epoch {
+            // voting source condition using prev_slot_head per spec
+            let voting_source_epoch = {
+                // Compute the epoch of the voting source that most validators used for prev_slot_head
+                use std::collections::HashMap;
+                let balances = &fc_store.justified_balances().effective_balances;
+                let mut epoch_to_weight: HashMap<Epoch, u128> = HashMap::new();
+                for (validator_index, &eb) in balances.iter().enumerate() {
+                    if eb == 0 {
+                        continue;
+                    }
+                    if let Some((vote_root, vote_epoch)) =
+                        proto_array.latest_message(validator_index)
+                    {
+                        if proto_array.is_descendant(self.fcr_store.prev_slot_head, vote_root) {
+                            *epoch_to_weight.entry(vote_epoch).or_insert(0) += eb as u128;
+                        }
+                    }
+                }
+                epoch_to_weight
+                    .into_iter()
+                    .max_by_key(|(_, w)| *w)
+                    .map(|(e, _)| e)
+                    .unwrap_or(
+                        self.fcr_store
+                            .prev_slot_unrealized_justified_checkpoint
+                            .epoch,
+                    )
+            };
+
+            let voting_source_ok = voting_source_epoch + 2 >= current_epoch;
+
+            // boundary OR (no_conflict AND (uj_prev OR uj_head))
+            let boundary = fc_store.get_current_slot() % E::slots_per_epoch() == 0;
+            let no_conflict = self
+                .will_no_conflicting_checkpoint_be_justified(proto_array, fc_store, head_root)
+                .unwrap_or(false);
+
+            // read unrealized justification epoch for prev_slot_head and head
+            let uj_prev = proto_array
+                .get_block(&self.fcr_store.prev_slot_head)
+                .and_then(|b| {
+                    b.unrealized_justified_checkpoint
+                        .as_ref()
+                        .map(|cp| cp.epoch)
+                })
+                .map(|e| e + 1 >= current_epoch)
+                .unwrap_or(false);
+            let uj_head = proto_array
+                .get_block(&head_root)
+                .and_then(|b| {
+                    b.unrealized_justified_checkpoint
+                        .as_ref()
+                        .map(|cp| cp.epoch)
+                })
+                .map(|e| e + 1 >= current_epoch)
+                .unwrap_or(false);
+
+            if voting_source_ok && (boundary || (no_conflict && (uj_prev || uj_head))) {
+                // advancement through canonical chain for previous-epoch blocks
+                let mut current_confirmed = confirmed_root;
+                if let Some(canonical_roots) =
+                    self.get_canonical_roots(proto_array, confirmed_root, head_root)
+                {
+                    for &block_root in canonical_roots.iter().skip(1) {
+                        let block = match proto_array.get_block(&block_root) {
+                            Some(b) => b,
+                            None => break,
+                        };
+                        let block_epoch = block.slot.epoch(E::slots_per_epoch());
+                        if block_epoch == current_epoch {
+                            break;
+                        }
+                        if !proto_array.is_descendant(self.fcr_store.prev_slot_head, block_root) {
+                            break;
+                        }
+                        if self
+                            .is_one_confirmed(block_root, proto_array, fc_store)
+                            .ok()?
+                        {
+                            current_confirmed = block_root;
+                        } else {
+                            break;
+                        }
+                    }
+                    confirmed_root = current_confirmed;
+                }
             }
         }
 
         // Second condition: Current epoch advancement
         if fc_store.get_current_slot() % E::slots_per_epoch() == 0 || {
-            // Stricter unrealized-justification gate per Python spec:
-            // require that either prev_slot_head or head has an unrealized justification epoch
-            // at least current_epoch - 1.
             let current_epoch = fc_store.get_current_slot().epoch(E::slots_per_epoch());
-            let head = head_root;
-            let prev_head = self.fcr_store.prev_slot_head;
-            let cond_prev = self
-                .get_unrealized_justification_epoch(proto_array, prev_head)
-                .ok()
-                .flatten()
+            let cond_prev = proto_array
+                .get_block(&self.fcr_store.prev_slot_head)
+                .and_then(|b| {
+                    b.unrealized_justified_checkpoint
+                        .as_ref()
+                        .map(|cp| cp.epoch)
+                })
                 .map(|e| e + 1 >= current_epoch)
                 .unwrap_or(false);
-            let cond_head = self
-                .get_unrealized_justification_epoch(proto_array, head)
-                .ok()
-                .flatten()
+            let cond_head = proto_array
+                .get_block(&head_root)
+                .and_then(|b| {
+                    b.unrealized_justified_checkpoint
+                        .as_ref()
+                        .map(|cp| cp.epoch)
+                })
                 .map(|e| e + 1 >= current_epoch)
                 .unwrap_or(false);
             cond_prev || cond_head
         } {
-            if let Some(new_confirmed) =
-                self.try_advance_current_epoch(confirmed_root, proto_array, fc_store, head_root)
+            // current-epoch advancement
+            let mut tentative_confirmed = confirmed_root;
+            if let Some(canonical_roots) =
+                self.get_canonical_roots(proto_array, confirmed_root, head_root)
             {
-                confirmed_root = new_confirmed;
+                for &block_root in canonical_roots.iter().skip(1) {
+                    let block = match proto_array.get_block(&block_root) {
+                        Some(b) => b,
+                        None => break,
+                    };
+                    let block_epoch = block.slot.epoch(E::slots_per_epoch());
+                    let tentative_epoch = proto_array
+                        .get_block(&tentative_confirmed)
+                        .map(|b| b.slot.epoch(E::slots_per_epoch()))
+                        .unwrap_or(block_epoch);
+
+                    if block_epoch > tentative_epoch {
+                        // crossing into current epoch: ensure checkpoint will be justified
+                        if let Some(checkpoint_root) =
+                            self.get_checkpoint_block(proto_array, block_root, block_epoch)
+                        {
+                            let checkpoint = Checkpoint {
+                                epoch: block_epoch,
+                                root: checkpoint_root,
+                            };
+                            if !self
+                                .will_checkpoint_be_justified(proto_array, fc_store, &checkpoint)
+                                .unwrap_or(false)
+                            {
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+
+                    if self
+                        .is_one_confirmed(block_root, proto_array, fc_store)
+                        .ok()?
+                    {
+                        tentative_confirmed = block_root;
+                    } else {
+                        break;
+                    }
+                }
             }
+
+            // Final safety check for current epoch confirmation per spec
+            let current_epoch = fc_store.get_current_slot().epoch(E::slots_per_epoch());
+            let tentative_epoch = proto_array
+                .get_block(&tentative_confirmed)
+                .map(|b| b.slot.epoch(E::slots_per_epoch()))
+                .unwrap_or(current_epoch);
+            let safe = if tentative_epoch == current_epoch {
+                // voting source recency for tentative_confirmed
+                use std::collections::HashMap;
+                let balances = &fc_store.justified_balances().effective_balances;
+                let mut epoch_to_weight: HashMap<Epoch, u128> = HashMap::new();
+                for (validator_index, &eb) in balances.iter().enumerate() {
+                    if eb == 0 {
+                        continue;
+                    }
+                    if let Some((vote_root, vote_epoch)) =
+                        proto_array.latest_message(validator_index)
+                    {
+                        if proto_array.is_descendant(tentative_confirmed, vote_root) {
+                            *epoch_to_weight.entry(vote_epoch).or_insert(0) += eb as u128;
+                        }
+                    }
+                }
+                let voting_source_epoch = epoch_to_weight
+                    .into_iter()
+                    .max_by_key(|(_, w)| *w)
+                    .map(|(e, _)| e)
+                    .unwrap_or(
+                        self.fcr_store
+                            .prev_slot_unrealized_justified_checkpoint
+                            .epoch,
+                    );
+                voting_source_epoch + 2 >= current_epoch
+            } else if fc_store.get_current_slot() % E::slots_per_epoch() == 0 {
+                self.will_no_conflicting_checkpoint_be_justified(proto_array, fc_store, head_root)
+                    .unwrap_or(false)
+            } else {
+                false
+            };
+
+            confirmed_root = if safe {
+                tentative_confirmed
+            } else {
+                confirmed_root
+            };
         }
 
         Some(confirmed_root)
-    }
-
-    /// Checks voting source conditions for confirmation advancement.
-    ///
-    /// **Python Specification**: Part of `find_latest_confirmed_descendant()` logic
-    ///
-    /// This function checks if the voting source conditions are met for advancing
-    /// confirmation through the canonical chain. It ensures that the previous
-    /// slot's head is properly connected to the current confirmation logic.
-    ///
-    /// # Arguments
-    /// * `proto_array` - The proto array containing the block DAG
-    /// * `fc_store` - The fork choice store containing current state
-    /// * `head_root` - The current head block root
-    ///
-    /// # Returns
-    /// * `Ok(bool)` - True if voting source conditions are met
-    /// * `Err(Error)` - Error occurred during check
-    fn check_voting_source_conditions<T>(
-        &self,
-        proto_array: &ProtoArrayForkChoice,
-        fc_store: &T,
-        head_root: Hash256,
-    ) -> Result<bool, crate::Error<T::Error>>
-    where
-        T: ForkChoiceStore<E>,
-    {
-        let current_epoch = fc_store.get_current_slot().epoch(E::slots_per_epoch());
-
-        // Check if the voting source epoch is within the required range
-        // This ensures that the previous slot's head is recent enough
-        let voting_source_epoch = self
-            .get_voting_source_epoch(proto_array, fc_store, head_root)
-            .unwrap();
-
-        Ok(voting_source_epoch + 2 >= current_epoch)
-    }
-
-    /// Gets the voting source epoch for a block.
-    ///
-    /// **Python Specification**: Helper function for voting source conditions
-    ///
-    /// This function determines the epoch of the voting source for a given block.
-    /// The voting source is the block that validators are voting for when they
-    /// vote for the given block.
-    ///
-    /// # Returns
-    /// * `Ok(Epoch)` - The voting source epoch
-    /// * `Err(Error)` - Error occurred during calculation
-    fn get_voting_source_epoch<T>(
-        &self,
-        proto_array: &ProtoArrayForkChoice,
-        fc_store: &T,
-        block_root: Hash256,
-    ) -> Result<Epoch, crate::Error<String>>
-    where
-        T: ForkChoiceStore<E>,
-    {
-        use std::collections::HashMap;
-        let balances = &fc_store.justified_balances().effective_balances;
-
-        let mut epoch_to_weight: HashMap<Epoch, u128> = HashMap::new();
-        for (validator_index, &eb) in balances.iter().enumerate() {
-            if eb == 0 {
-                continue;
-            }
-            if let Some((vote_root, vote_epoch)) = proto_array.latest_message(validator_index) {
-                // Consider votes that support (are descendants of) the given block_root
-                if proto_array.is_descendant(block_root, vote_root) {
-                    *epoch_to_weight.entry(vote_epoch).or_insert(0) += eb as u128;
-                }
-            }
-        }
-
-        if let Some((best_epoch, _)) = epoch_to_weight.into_iter().max_by_key(|(_, w)| *w) {
-            return Ok(best_epoch);
-        }
-
-        // Fallback: use prev_slot_unrealized_justified_checkpoint epoch as conservative proxy
-        Ok(self
-            .fcr_store
-            .prev_slot_unrealized_justified_checkpoint
-            .epoch)
-    }
-
-    /// Returns the unrealized justification epoch for a given block if available.
-    fn get_unrealized_justification_epoch(
-        &self,
-        proto_array: &ProtoArrayForkChoice,
-        block_root: Hash256,
-    ) -> Result<Option<Epoch>, crate::Error<String>> {
-        let Some(block) = proto_array.get_block(&block_root) else {
-            return Err(ProtoArrayStringError(
-                "Block not found while reading unrealized justification".to_string(),
-            ));
-        };
-        Ok(block
-            .unrealized_justified_checkpoint
-            .as_ref()
-            .map(|cp| cp.epoch))
-    }
-
-    /// Advances confirmation through the canonical chain for previous epoch blocks.
-    ///
-    /// **Python Specification**: Part of `find_latest_confirmed_descendant()` logic
-    ///
-    /// # Arguments
-    /// * `confirmed_root` - The current confirmed root
-    /// * `proto_array` - The proto array containing the block DAG
-    /// * `fc_store` - The fork choice store containing current state
-    /// * `head_root` - The current head block root
-    ///
-    /// # Returns
-    /// * `Some(Hash256)` - The new confirmed root
-    /// * `None` - No advancement possible
-    fn advance_through_canonical_chain<T>(
-        &self,
-        confirmed_root: Hash256,
-        proto_array: &ProtoArrayForkChoice,
-        fc_store: &T,
-        head_root: Hash256,
-    ) -> Option<Hash256>
-    where
-        T: ForkChoiceStore<E>,
-    {
-        let current_epoch = fc_store.get_current_slot().epoch(E::slots_per_epoch());
-        let mut current_confirmed = confirmed_root;
-
-        // Get canonical chain from confirmed root to head
-        let canonical_roots = self.get_canonical_roots(proto_array, confirmed_root, head_root)?;
-
-        // Skip the first root (confirmed_root itself)
-        for &block_root in canonical_roots.iter().skip(1) {
-            let block = proto_array.get_block(&block_root)?;
-            let block_epoch = block.slot.epoch(E::slots_per_epoch());
-
-            // Stop if we reach current epoch
-            if block_epoch == current_epoch {
-                break;
-            }
-
-            // Check if this block is a descendant of the previous head
-            if !proto_array.is_descendant(self.fcr_store.prev_slot_head, block_root) {
-                break;
-            }
-
-            // Check if this block is confirmed
-            if self
-                .is_one_confirmed(block_root, proto_array, fc_store)
-                .ok()?
-            {
-                current_confirmed = block_root;
-            } else {
-                break;
-            }
-        }
-
-        Some(current_confirmed)
-    }
-
-    /// Tries to advance confirmation for current epoch blocks.
-    ///
-    /// **Python Specification**: Part of `find_latest_confirmed_descendant()` logic
-    ///
-    /// # Arguments
-    /// * `confirmed_root` - The current confirmed root
-    /// * `proto_array` - The proto array containing the block DAG
-    /// * `fc_store` - The fork choice store containing current state
-    /// * `head_root` - The current head block root
-    ///
-    /// # Returns
-    /// * `Some(Hash256)` - The new confirmed root
-    /// * `None` - No advancement possible
-    fn try_advance_current_epoch<T>(
-        &self,
-        confirmed_root: Hash256,
-        proto_array: &ProtoArrayForkChoice,
-        fc_store: &T,
-        head_root: Hash256,
-    ) -> Option<Hash256>
-    where
-        T: ForkChoiceStore<E>,
-    {
-        let mut tentative_confirmed = confirmed_root;
-
-        // Get canonical chain from confirmed root to head
-        let canonical_roots = self.get_canonical_roots(proto_array, confirmed_root, head_root)?;
-
-        // Skip the first root (confirmed_root itself)
-        for &block_root in canonical_roots.iter().skip(1) {
-            let block = proto_array.get_block(&block_root)?;
-            let block_epoch = block.slot.epoch(E::slots_per_epoch());
-            let tentative_block = proto_array.get_block(&tentative_confirmed)?;
-            let tentative_epoch = tentative_block.slot.epoch(E::slots_per_epoch());
-
-            // If we advance to current epoch, check checkpoint justification
-            if block_epoch > tentative_epoch {
-                let checkpoint_root =
-                    self.get_checkpoint_block(proto_array, block_root, block_epoch)?;
-                let checkpoint = Checkpoint {
-                    epoch: block_epoch,
-                    root: checkpoint_root,
-                };
-
-                // Ensure current epoch checkpoint will be justified
-                if !self
-                    .will_checkpoint_be_justified(proto_array, fc_store, &checkpoint)
-                    .unwrap_or(false)
-                {
-                    break;
-                }
-            }
-
-            // Check if this block is confirmed
-            if self
-                .is_one_confirmed(block_root, proto_array, fc_store)
-                .ok()?
-            {
-                tentative_confirmed = block_root;
-            } else {
-                break;
-            }
-        }
-
-        // Final safety check for current epoch confirmation
-        if self
-            .check_current_epoch_confirmation_safety(
-                tentative_confirmed,
-                proto_array,
-                fc_store,
-                head_root,
-            )
-            .unwrap_or(false)
-        {
-            Some(tentative_confirmed)
-        } else {
-            Some(confirmed_root)
-        }
     }
 
     /// Gets canonical roots from ancestor to descendant.
@@ -1374,60 +1267,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         Ok(false)
     }
 
-    /// Checks safety conditions for current epoch confirmation.
-    ///
-    /// **Python Specification**: Part of `find_latest_confirmed_descendant()` logic
-    ///
-    /// This function checks if it's safe to confirm a block from the current epoch.
-    /// It ensures that the confirmation won't be reorged out in either the current
-    /// or next epoch.
-    ///
-    /// # Arguments
-    /// * `tentative_confirmed` - The tentative confirmed block root
-    /// * `proto_array` - The proto array containing the block DAG
-    /// * `fc_store` - The fork choice store containing current state
-    /// * `head_root` - The current head block root
-    ///
-    /// # Returns
-    /// * `Ok(bool)` - True if current epoch confirmation is safe
-    /// * `Err(Error)` - Error occurred during check
-    fn check_current_epoch_confirmation_safety<T>(
-        &self,
-        tentative_confirmed: Hash256,
-        proto_array: &ProtoArrayForkChoice,
-        fc_store: &T,
-        head_root: Hash256,
-    ) -> Result<bool, crate::Error<T::Error>>
-    where
-        T: ForkChoiceStore<E>,
-    {
-        let current_epoch = fc_store.get_current_slot().epoch(E::slots_per_epoch());
-        let tentative_block = proto_array.get_block(&tentative_confirmed).ok_or_else(|| {
-            crate::Error::ProtoArrayStringError("Tentative confirmed block not found".to_string())
-        })?;
-        let tentative_epoch = tentative_block.slot.epoch(E::slots_per_epoch());
-
-        // If the tentative confirmed block is from the current epoch
-        if tentative_epoch == current_epoch {
-            // Check if the voting source epoch is recent enough
-            let voting_source_epoch = self
-                .get_voting_source_epoch(proto_array, fc_store, tentative_confirmed)
-                .unwrap();
-            return Ok(voting_source_epoch + 2 >= current_epoch);
-        }
-
-        // For blocks from previous epochs, check if we're at epoch boundary
-        // and no conflicting checkpoint will be justified
-        if fc_store.get_current_slot() % E::slots_per_epoch() == 0 {
-            return self.will_no_conflicting_checkpoint_be_justified(
-                proto_array,
-                fc_store,
-                head_root,
-            );
-        }
-
-        Ok(false)
-    }
+    // removed: inline logic now lives in find_latest_confirmed_descendant
 
     /// Gets the checkpoint weight for FFG analysis.
     ///

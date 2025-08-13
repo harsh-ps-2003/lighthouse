@@ -3004,6 +3004,142 @@ async fn fcr_pruning_correctness_basic() {
     assert!(fork_choice.is_descendant(confirmed_root, head_root) || confirmed_root == head_root);
 }
 
+/// At the start of an epoch, confirmed should promote to the prev-slot unrealized justified
+/// checkpoint if it is later than the current confirmed (epoch-start uplift per spec).
+#[tokio::test]
+async fn fcr_epoch_start_uplift_promotes_prev_uj() {
+    let config = ChainConfig {
+        fast_confirmation_enabled: true,
+        fcr_byzantine_threshold_percentage: DEFAULT_FCR_BYZANTINE_THRESHOLD_PERCENTAGE,
+        ..ChainConfig::default()
+    };
+    let test = ForkChoiceTest::new_with_chain_config(config)
+        // Build up to just before an epoch boundary with attestations
+        .apply_blocks(E::slots_per_epoch() as usize - 1)
+        .await;
+
+    // Produce the last block of the epoch; then advance one slot to enter new epoch
+    let test = test.apply_blocks(1).await; // last slot of previous epoch
+    let prev_epoch_last_slot = test.harness.get_current_slot().saturating_sub(Slot::new(1));
+
+    // Enter next epoch (slot tick and block)
+    let test = test.apply_blocks(1).await;
+
+    let fc = test.harness.chain.canonical_head.fork_choice_read_lock();
+    let confirmed = fc.get_fast_confirmed_head().expect("confirmed head");
+    let proto = fc.proto_array();
+
+    // Expect uplift to the prev-epoch last block if it is later than prior confirmed
+    let expected_prev_epoch_root = test
+        .harness
+        .chain
+        .block_at_slot(prev_epoch_last_slot, WhenSlotSkipped::Prev)
+        .unwrap()
+        .unwrap()
+        .canonical_root();
+    let confirmed_slot = proto.get_block(&confirmed).expect("confirmed exists").slot;
+    let expected_slot = prev_epoch_last_slot;
+    assert_eq!(
+        confirmed_slot, expected_slot,
+        "epoch-start uplift to prev UJ"
+    );
+    // Sanity: the confirmed root should match that block's root or be a descendant at the same slot
+    let confirmed_is_expected = confirmed == expected_prev_epoch_root
+        || proto.get_block(&confirmed).map(|n| n.slot) == Some(expected_slot);
+    assert!(confirmed_is_expected);
+}
+
+/// Epoch-start uplift should not promote if the prev-slot unrealized justified checkpoint
+/// is not later than current confirmed.
+#[tokio::test]
+async fn fcr_epoch_start_uplift_no_promotion_when_not_later() {
+    let config = ChainConfig {
+        fast_confirmation_enabled: true,
+        fcr_byzantine_threshold_percentage: DEFAULT_FCR_BYZANTINE_THRESHOLD_PERCENTAGE,
+        ..ChainConfig::default()
+    };
+    let test = ForkChoiceTest::new_with_chain_config(config)
+        // Build a couple of blocks in current epoch so confirmed is already at the tip
+        .apply_blocks(2)
+        .await;
+
+    let fc_before = test.harness.chain.canonical_head.fork_choice_read_lock();
+    let confirmed_before = fc_before.get_fast_confirmed_head().expect("confirmed");
+    drop(fc_before);
+
+    // Cross epoch boundary with no new attestations; confirmed should not be forced backwards/sideways
+    let test = test
+        .apply_blocks_without_new_attestations(E::slots_per_epoch() as usize + 1)
+        .await;
+    let fc_after = test.harness.chain.canonical_head.fork_choice_read_lock();
+    let confirmed_after = fc_after.get_fast_confirmed_head().expect("confirmed");
+    // Either unchanged or descendant (monotonic)
+    assert!(
+        confirmed_before == confirmed_after
+            || fc_after.is_descendant(confirmed_before, confirmed_after),
+        "no unintended promotion when prev UJ is not later"
+    );
+}
+
+/// Previous-epoch advancement must be anchored to prev_slot_head context; a head change after
+/// the slot tick should not invalidate advancement derived from prev_slot_head.
+#[tokio::test]
+async fn fcr_prev_slot_head_gate_stable_under_head_change() {
+    let config = ChainConfig {
+        fast_confirmation_enabled: true,
+        fcr_byzantine_threshold_percentage: DEFAULT_FCR_BYZANTINE_THRESHOLD_PERCENTAGE,
+        ..ChainConfig::default()
+    };
+    // Build into an epoch and capture a confirmed head
+    let test = ForkChoiceTest::new_with_chain_config(config)
+        .apply_blocks(E::slots_per_epoch() as usize)
+        .await;
+
+    let fc1 = test.harness.chain.canonical_head.fork_choice_read_lock();
+    let confirmed1 = fc1.get_fast_confirmed_head().expect("confirmed");
+    drop(fc1);
+
+    // Create a quick head change (new block) and ensure confirmation remains stable/non-regressive
+    let test = test.apply_blocks(1).await;
+    let fc2 = test.harness.chain.canonical_head.fork_choice_read_lock();
+    let confirmed2 = fc2.get_fast_confirmed_head().expect("confirmed");
+    assert!(
+        confirmed1 == confirmed2 || fc2.is_descendant(confirmed1, confirmed2),
+        "prev_slot_head anchored advancement remains stable across immediate head change"
+    );
+}
+
+/// Proposer boost alone (without attestations across boundary) must not enable current-epoch
+/// confirmations; remain conservative until FFG can justify.
+#[tokio::test]
+async fn fcr_no_current_epoch_confirm_without_attestations_even_with_boost() {
+    let config = ChainConfig {
+        fast_confirmation_enabled: true,
+        fcr_byzantine_threshold_percentage: DEFAULT_FCR_BYZANTINE_THRESHOLD_PERCENTAGE,
+        ..ChainConfig::default()
+    };
+    // Build to just before epoch boundary, then cross boundary without new attestations.
+    let test = ForkChoiceTest::new_with_chain_config(config)
+        .apply_blocks(E::slots_per_epoch() as usize - 1)
+        .await
+        .apply_blocks_without_new_attestations(2)
+        .await;
+
+    let fc = test.harness.chain.canonical_head.fork_choice_read_lock();
+    let confirmed = fc.get_fast_confirmed_head().expect("confirmed");
+    let confirmed_epoch = fc
+        .proto_array()
+        .get_block(&confirmed)
+        .unwrap()
+        .slot
+        .epoch(E::slots_per_epoch());
+    let current_epoch = test.harness.get_current_slot().epoch(E::slots_per_epoch());
+    assert!(
+        confirmed_epoch <= current_epoch.saturating_sub(Epoch::new(1)),
+        "no current-epoch confirms without FFG attestations despite proposer boost"
+    );
+}
+
 /// Higher beta should reduce confirmations (be more conservative)
 proptest! {
     #[test]
