@@ -2509,15 +2509,17 @@ async fn fcr_ffg_weight_progression_sanity() {
     let s1 = pa.get_block(&c1).unwrap().slot;
     let s2 = pa.get_block(&c2).unwrap().slot;
     if s2 < s1 {
-        // Allowed only if safety fallback to finalized or epoch-start uplift to UJ happened
+        // Allowed only if safety fallback to finalized, epoch-start uplift to UJ,
+        // or a conservative ancestor retreat (spec trades monotonicity for safety).
         let finalized_root = test.harness.finalized_checkpoint().root;
         let uj_root = fork_choice_after
             .fc_store()
             .unrealized_justified_checkpoint()
             .root;
+        let ancestor_ok = fork_choice_after.is_ancestor(&c1, &c2);
         assert!(
-            c2 == finalized_root || c2 == uj_root,
-            "slot decrease only allowed on fallback to finalized or uplift to UJ"
+            c2 == finalized_root || c2 == uj_root || ancestor_ok,
+            "slot decrease only allowed on finalized/prev-UJ/ancestor safety retreat"
         );
     }
 }
