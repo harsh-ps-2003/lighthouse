@@ -511,6 +511,24 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             return Some(finalized);
         }
 
+        // At the start of an epoch, if the prev-slot unrealized justified checkpoint
+        // belongs to the previous epoch and is later than the current confirmed,
+        // promote confirmed to that checkpoint (spec-aligned safety uplift)
+        if fc_store.get_current_slot() % E::slots_per_epoch() == 0 {
+            let prev_uj = *fc_store.unrealized_justified_checkpoint();
+            let prev_uj_epoch = prev_uj.epoch;
+            if prev_uj_epoch + 1 == current_epoch {
+                if let (Some(confirmed_block), Some(prev_uj_block)) = (
+                    proto_array.get_block(&confirmed_root),
+                    proto_array.get_block(&prev_uj.root),
+                ) {
+                    if confirmed_block.slot < prev_uj_block.slot {
+                        return Some(prev_uj.root);
+                    }
+                }
+            }
+        }
+
         // Try to advance the confirmed root along the canonical chain
         // This is equivalent to Python spec's find_latest_confirmed_descendant logic
         if let Some(new_confirmed) =
@@ -923,10 +941,26 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             && self
                 .check_voting_source_conditions(proto_array, fc_store, head_root)
                 .unwrap_or(false)
-            && (fc_store.get_current_slot() % E::slots_per_epoch() == 0
-                || self
+            && {
+                // boundary OR (no_conflict AND (uj_prev OR uj_head))
+                let boundary = fc_store.get_current_slot() % E::slots_per_epoch() == 0;
+                let no_conflict = self
                     .will_no_conflicting_checkpoint_be_justified(proto_array, fc_store, head_root)
-                    .unwrap_or(false))
+                    .unwrap_or(false);
+                let uj_prev = self
+                    .get_unrealized_justification_epoch(proto_array, self.fcr_store.prev_slot_head)
+                    .ok()
+                    .flatten()
+                    .map(|e| e + 1 >= current_epoch)
+                    .unwrap_or(false);
+                let uj_head = self
+                    .get_unrealized_justification_epoch(proto_array, head_root)
+                    .ok()
+                    .flatten()
+                    .map(|e| e + 1 >= current_epoch)
+                    .unwrap_or(false);
+                boundary || (no_conflict && (uj_prev || uj_head))
+            }
         {
             // Advance through canonical chain for previous epoch blocks
             if let Some(new_confirmed) = self.advance_through_canonical_chain(
