@@ -986,6 +986,20 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 .map(|e| e + 1 >= current_epoch)
                 .unwrap_or(false);
 
+            // Gate diagnostics for previous-epoch advancement
+            debug!(
+                confirmed = %confirmed_root,
+                head = %head_root,
+                voting_source_epoch = voting_source_epoch.as_u64(),
+                current_epoch = current_epoch.as_u64(),
+                voting_source_ok = voting_source_ok,
+                boundary = boundary,
+                no_conflict = no_conflict,
+                uj_prev = uj_prev,
+                uj_head = uj_head,
+                "FCR prev-epoch advancement gate"
+            );
+
             if voting_source_ok && (boundary || (no_conflict && (uj_prev || uj_head))) {
                 // advancement through canonical chain for previous-epoch blocks
                 let mut current_confirmed = confirmed_root;
@@ -1120,10 +1134,28 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                             .prev_slot_unrealized_justified_checkpoint
                             .epoch,
                     );
-                voting_source_epoch + 2 >= current_epoch
+                let ok = voting_source_epoch + 2 >= current_epoch;
+                debug!(
+                    tentative = %tentative_confirmed,
+                    head = %head_root,
+                    voting_source_epoch = voting_source_epoch.as_u64(),
+                    current_epoch = current_epoch.as_u64(),
+                    safe = ok,
+                    "FCR current-epoch advancement (voting-source)"
+                );
+                ok
             } else if fc_store.get_current_slot() % E::slots_per_epoch() == 0 {
-                self.will_no_conflicting_checkpoint_be_justified(proto_array, fc_store, head_root)
-                    .unwrap_or(false)
+                let ok = self
+                    .will_no_conflicting_checkpoint_be_justified(proto_array, fc_store, head_root)
+                    .unwrap_or(false);
+                debug!(
+                    tentative = %tentative_confirmed,
+                    head = %head_root,
+                    boundary = true,
+                    safe = ok,
+                    "FCR current-epoch advancement (boundary no-conflict)"
+                );
+                ok
             } else {
                 false
             };
@@ -1412,10 +1444,18 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             Ok(Some(state)) => state,
             Ok(None) => {
                 // If checkpoint state is not available, assume it won't be justified
+                debug!(
+                    checkpoint_epoch = checkpoint.epoch.as_u64(),
+                    "FCR FFG: checkpoint state unavailable; assuming not justified"
+                );
                 return Ok(false);
             }
             Err(_) => {
                 // If we can't access the checkpoint state, assume it won't be justified
+                debug!(
+                    checkpoint_epoch = checkpoint.epoch.as_u64(),
+                    "FCR FFG: checkpoint state error; assuming not justified"
+                );
                 return Ok(false);
             }
         };
@@ -1510,10 +1550,18 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             Ok(Some(state)) => state,
             Ok(None) => {
                 // If checkpoint state is not available, assume it won't be justified
+                debug!(
+                    checkpoint_epoch = checkpoint.epoch.as_u64(),
+                    "FCR FFG: checkpoint state unavailable (no-conflict); assuming conflict possible"
+                );
                 return Ok(false);
             }
             Err(_) => {
                 // If we can't access the checkpoint state, assume it won't be justified
+                debug!(
+                    checkpoint_epoch = checkpoint.epoch.as_u64(),
+                    "FCR FFG: checkpoint state error (no-conflict); assuming conflict possible"
+                );
                 return Ok(false);
             }
         };
