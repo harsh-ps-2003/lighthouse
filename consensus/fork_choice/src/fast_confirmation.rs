@@ -533,7 +533,6 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         }
 
         // Try to advance the confirmed root along the canonical chain
-        // This is equivalent to Python spec's find_latest_confirmed_descendant logic
         if let Some(new_confirmed) =
             self.find_latest_confirmed_descendant(confirmed_root, proto_array, fc_store, head_root)
         {
@@ -642,7 +641,9 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     ///
     /// Per spec, this function performs ONLY the LMD-GHOST inequality without any
     /// FFG gating. FFG-related checks are handled in the advancement logic
-    /// (`find_latest_confirmed_descendant`)
+    /// `find_latest_confirmed_descendant`. If the weighting checkpoint state is
+    /// unavailable, we conservatively fall back to using `justified_balances` to
+    /// estimate W.
     ///
     /// # Arguments
     /// * `block_root` - The block root to check for confirmation
@@ -1174,6 +1175,11 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     ///
     /// **Python Specification**: `get_canonical_roots(store, ancestor_slot)`
     ///
+    /// Note: Signature adapted for Lighthouse. The spec takes `ancestor_slot` and
+    /// derives a suffix to the head, whereas here we explicitly return the path
+    /// between `ancestor_root` and `descendant_root` (inclusive) along the
+    /// canonical chain.
+    ///
     /// # Arguments
     /// * `proto_array` - The proto array containing the block DAG
     /// * `ancestor_root` - The ancestor block root
@@ -1299,8 +1305,6 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         // This is a conservative approach for safety
         Ok(false)
     }
-
-    // removed: inline logic now lives in find_latest_confirmed_descendant
 
     /// Gets the checkpoint weight for FFG analysis.
     ///
