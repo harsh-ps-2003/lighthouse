@@ -364,11 +364,20 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     where
         T: ForkChoiceStore<E>,
     {
+        let prev_confirmed = self.fcr_store.confirmed_root;
         // Update the confirmed root to the latest confirmed block
         if let Some(new_confirmed_root) =
             self.get_latest_confirmed(proto_array, fc_store, head_root)
         {
             self.fcr_store.confirmed_root = new_confirmed_root;
+            if new_confirmed_root != prev_confirmed {
+                info!(
+                    old = %prev_confirmed,
+                    new = %new_confirmed_root,
+                    slot = fc_store.get_current_slot().as_u64(),
+                    "FCR: per-slot confirmed root updated"
+                );
+            }
         }
 
         // Store the previous slot's state
@@ -796,6 +805,21 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             "FCR is_one_confirmed LMD check"
         );
 
+        if lmd_confirmed {
+            let slot_u64 = block.slot.as_u64();
+            let epoch_u64 = block.slot.epoch(E::slots_per_epoch()).as_u64();
+            info!(
+                block = %block_root,
+                slot = slot_u64,
+                epoch = epoch_u64,
+                support = support,
+                committee_weight = committee_weight,
+                proposer_score = proposer_score,
+                beta = beta_threshold,
+                "FCR: block meets LMD confirmation threshold"
+            );
+        }
+
         // Per spec, do not apply FFG gating here. Return LMD result only.
         Ok(lmd_confirmed)
     }
@@ -830,6 +854,20 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                     confirmed: true,
                 },
             );
+        }
+
+        // Log the confirmation with slot/epoch info if available.
+        if let Some(block) = proto_array.get_block(&block_root) {
+            let slot_u64 = block.slot.as_u64();
+            let epoch_u64 = block.slot.epoch(E::slots_per_epoch()).as_u64();
+            info!(
+                block = %block_root,
+                slot = slot_u64,
+                epoch = epoch_u64,
+                "FCR: block confirmed"
+            );
+        } else {
+            info!(block = %block_root, "FCR: block confirmed");
         }
 
         // Mark all descendants as confirmed
