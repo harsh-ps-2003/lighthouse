@@ -16,7 +16,7 @@ use std::error::Error;
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 use types::{
     BeaconState, ChainSpec, Checkpoint, Epoch, EthSpec, FixedBytesExtended, Hash256, Slot,
 };
@@ -423,9 +423,15 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     where
         T: ForkChoiceStore<E>,
     {
+        let head_slot = proto_array
+            .get_block(&head_root)
+            .map(|b| b.slot.as_u64())
+            .unwrap_or_default();
         debug!(
             slot = fc_store.get_current_slot().as_u64(),
             head = %head_root,
+            head_slot = head_slot,
+            prev_confirmed = %self.fcr_store.confirmed_root,
             "FCR on_new_slot"
         );
         self.update_per_slot(proto_array, fc_store, head_root)
@@ -492,6 +498,22 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     {
         let mut confirmed_root = self.fcr_store.confirmed_root;
         let current_epoch = fc_store.get_current_slot().epoch(E::slots_per_epoch());
+        let head_slot = proto_array
+            .get_block(&head_root)
+            .map(|b| b.slot.as_u64())
+            .unwrap_or_default();
+        let confirmed_slot_initial = proto_array
+            .get_block(&confirmed_root)
+            .map(|b| b.slot.as_u64())
+            .unwrap_or_default();
+        debug!(
+            head = %head_root,
+            head_slot = head_slot,
+            confirmed_initial = %confirmed_root,
+            confirmed_initial_slot = confirmed_slot_initial,
+            current_epoch = current_epoch.as_u64(),
+            "FCR get_latest_confirmed: start"
+        );
 
         // Safety check: if confirmed is missing/too-old/off-canonical, revert to finalized but
         // DO NOT return early; continue with epoch-start uplift and advancement as per spec.
@@ -535,6 +557,13 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                     proto_array.get_block(&prev_uj.root),
                 ) {
                     if confirmed_block.slot < prev_uj_block.slot {
+                        info!(
+                            prev_uj_root = %prev_uj.root,
+                            prev_uj_slot = prev_uj_block.slot.as_u64(),
+                            uplift_from = %confirmed_root,
+                            uplift_from_slot = confirmed_block.slot.as_u64(),
+                            "FCR: epoch-start uplift to prev-slot unrealized justified checkpoint"
+                        );
                         confirmed_root = prev_uj.root;
                     }
                 }
@@ -555,6 +584,18 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             }
             confirmed_root = new_confirmed;
         }
+
+        let final_confirmed_slot = proto_array
+            .get_block(&confirmed_root)
+            .map(|b| b.slot.as_u64())
+            .unwrap_or_default();
+        info!(
+            confirmed = %confirmed_root,
+            confirmed_slot = final_confirmed_slot,
+            head = %head_root,
+            head_slot = head_slot,
+            "FCR get_latest_confirmed: result"
+        );
 
         Some(confirmed_root)
     }
@@ -597,6 +638,14 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
 
         let mut found_confirmed: Option<Hash256> = None;
         while depth < MAX_REORG_DEPTH {
+            if let Some(b) = proto_array.get_block(&current_root) {
+                trace!(
+                    depth = depth,
+                    block = %current_root,
+                    slot = b.slot.as_u64(),
+                    "FCR scan: visiting ancestor"
+                );
+            }
             // Check if this block is already confirmed
             if let Some(meta) = self.meta.get(&current_root) {
                 if meta.confirmed {
@@ -607,7 +656,9 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             }
 
             // Check if this block meets confirmation criteria
-            if self.is_one_confirmed(current_root, proto_array, fc_store)? {
+            let lmd_ok = self.is_one_confirmed(current_root, proto_array, fc_store)?;
+            trace!(block = %current_root, passed = lmd_ok, "FCR scan: is_one_confirmed result");
+            if lmd_ok {
                 // Mark this block and all its descendants as confirmed
                 self.mark_confirmed(current_root, proto_array);
                 found_confirmed = Some(current_root);
@@ -705,6 +756,14 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         } else {
             self.fcr_store.prev_slot_justified_checkpoint
         };
+        trace!(
+            block = %block_root,
+            block_slot = block.slot.as_u64(),
+            parent_slot = parent_block.slot.as_u64(),
+            weighting_checkpoint_epoch = weighting_checkpoint.epoch.as_u64(),
+            weighting_checkpoint_root = %weighting_checkpoint.root,
+            "FCR is_one_confirmed: inputs"
+        );
 
         // Try to obtain the checkpoint state via the StateProvider. If unavailable, fall back
         // to pre-existing behavior that uses no checkpoint state and justified_balances.
@@ -743,8 +802,19 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 .unwrap_or(fc_store.justified_balances().total_effective_balance);
 
             if start_slot > end_slot {
+                trace!(
+                    start_slot = start_slot.as_u64(),
+                    end_slot = end_slot.as_u64(),
+                    "FCR W: empty range (start > end)"
+                );
                 0
             } else if self.is_full_validator_set_covered(start_slot, end_slot) {
+                trace!(
+                    start_slot = start_slot.as_u64(),
+                    end_slot = end_slot.as_u64(),
+                    tab = total_active_balance,
+                    "FCR W: full validator set covered → TAB"
+                );
                 total_active_balance
             } else {
                 let start_epoch = start_slot.epoch(E::slots_per_epoch());
@@ -752,7 +822,16 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 if start_epoch == end_epoch {
                     let slots_covered = end_slot - start_slot + 1;
                     let weight_per_slot = total_active_balance / E::slots_per_epoch();
-                    weight_per_slot * slots_covered.as_u64()
+                    let w = weight_per_slot * slots_covered.as_u64();
+                    trace!(
+                        start_slot = start_slot.as_u64(),
+                        end_slot = end_slot.as_u64(),
+                        slots_covered = slots_covered.as_u64(),
+                        weight_per_slot = weight_per_slot,
+                        w = w,
+                        "FCR W: same-epoch pro-rata"
+                    );
+                    w
                 } else {
                     // Cross-epoch boundary calculation with safety adjustment
                     let estimate = match self.calculate_cross_epoch_weight_estimate(
@@ -760,20 +839,50 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                         end_slot,
                         total_active_balance,
                     ) {
-                        Ok(estimate) => estimate,
+                        Ok(estimate) => {
+                            trace!(
+                                start_slot = start_slot.as_u64(),
+                                end_slot = end_slot.as_u64(),
+                                estimate = estimate,
+                                "FCR W: cross-epoch estimate"
+                            );
+                            estimate
+                        }
                         Err(_) => {
                             // Conservative fallback
                             let slots_covered = end_slot - start_slot + 1;
                             let weight_per_slot = total_active_balance / E::slots_per_epoch();
-                            weight_per_slot * slots_covered.as_u64()
+                            let w = weight_per_slot * slots_covered.as_u64();
+                            debug!(
+                                start_slot = start_slot.as_u64(),
+                                end_slot = end_slot.as_u64(),
+                                slots_covered = slots_covered.as_u64(),
+                                weight_per_slot = weight_per_slot,
+                                w = w,
+                                "FCR W: cross-epoch fallback pro-rata"
+                            );
+                            w
                         }
                     };
-                    self.adjust_committee_weight_estimate_to_ensure_safety(estimate)
+                    let adjusted = self.adjust_committee_weight_estimate_to_ensure_safety(estimate);
+                    trace!(
+                        estimate = estimate,
+                        adjusted = adjusted,
+                        "FCR W: safety-adjusted estimate"
+                    );
+                    adjusted
                 }
             }
         } else {
             // Fallback: use the existing method which relies on justified_balances
-            self.get_committee_weight_between_slots(start_slot, end_slot, fc_store)?
+            let w = self.get_committee_weight_between_slots(start_slot, end_slot, fc_store)?;
+            trace!(
+                start_slot = start_slot.as_u64(),
+                end_slot = end_slot.as_u64(),
+                w = w,
+                "FCR W: fc_store fallback"
+            );
+            w
         };
 
         // Get proposer boost score separately (as required by FCR spec)
@@ -928,6 +1037,11 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 }
             }
         }
+        debug!(
+            parent = %parent_root,
+            descendants_confirmed = (processed.len().saturating_sub(1)),
+            "FCR: descendants marked confirmed"
+        );
     }
 
     /// Finds the latest confirmed descendant along the canonical chain.
@@ -958,6 +1072,22 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     {
         let current_epoch = fc_store.get_current_slot().epoch(E::slots_per_epoch());
         let mut confirmed_root = confirmed_root;
+        let head_slot = proto_array
+            .get_block(&head_root)
+            .map(|b| b.slot.as_u64())
+            .unwrap_or_default();
+        let confirmed_slot = proto_array
+            .get_block(&confirmed_root)
+            .map(|b| b.slot.as_u64())
+            .unwrap_or_default();
+        debug!(
+            start_confirmed = %confirmed_root,
+            start_confirmed_slot = confirmed_slot,
+            head = %head_root,
+            head_slot = head_slot,
+            current_epoch = current_epoch.as_u64(),
+            "FCR find_latest_confirmed_descendant: start"
+        );
 
         // Get the confirmed block to check its epoch
         let Some(confirmed_block) = proto_array.get_block(&confirmed_root) else {
@@ -1057,10 +1187,11 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                         if !proto_array.is_descendant(self.fcr_store.prev_slot_head, block_root) {
                             break;
                         }
-                        if self
+                        let ok = self
                             .is_one_confirmed(block_root, proto_array, fc_store)
-                            .ok()?
-                        {
+                            .ok()?;
+                        trace!(block = %block_root, slot = block.slot.as_u64(), passed = ok, "FCR prev-epoch advance step");
+                        if ok {
                             current_confirmed = block_root;
                         } else {
                             break;
@@ -1123,6 +1254,12 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                                 .will_checkpoint_be_justified(proto_array, fc_store, &checkpoint)
                                 .unwrap_or(false)
                             {
+                                trace!(
+                                    block = %block_root,
+                                    slot = block.slot.as_u64(),
+                                    checkpoint_root = %checkpoint_root,
+                                    "FCR current-epoch advance gated: checkpoint not justified"
+                                );
                                 break;
                             }
                         } else {
@@ -1130,10 +1267,11 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                         }
                     }
 
-                    if self
+                    let ok = self
                         .is_one_confirmed(block_root, proto_array, fc_store)
-                        .ok()?
-                    {
+                        .ok()?;
+                    trace!(block = %block_root, slot = block.slot.as_u64(), passed = ok, "FCR current-epoch advance step");
+                    if ok {
                         tentative_confirmed = block_root;
                     } else {
                         break;
@@ -1206,6 +1344,18 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             };
         }
 
+        let final_slot = proto_array
+            .get_block(&confirmed_root)
+            .map(|b| b.slot.as_u64())
+            .unwrap_or_default();
+        debug!(
+            confirmed = %confirmed_root,
+            confirmed_slot = final_slot,
+            head = %head_root,
+            head_slot = head_slot,
+            "FCR find_latest_confirmed_descendant: result"
+        );
+
         Some(confirmed_root)
     }
 
@@ -1245,6 +1395,25 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
 
         canonical_roots.push(ancestor_root);
         canonical_roots.reverse();
+
+        if let (Some(first), Some(last)) = (canonical_roots.first(), canonical_roots.last()) {
+            let first_slot = proto_array
+                .get_block(first)
+                .map(|b| b.slot.as_u64())
+                .unwrap_or_default();
+            let last_slot = proto_array
+                .get_block(last)
+                .map(|b| b.slot.as_u64())
+                .unwrap_or_default();
+            trace!(
+                path_len = canonical_roots.len(),
+                start = %first,
+                start_slot = first_slot,
+                end = %last,
+                end_slot = last_slot,
+                "FCR canonical path"
+            );
+        }
 
         Some(canonical_roots)
     }
@@ -1543,7 +1712,22 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         let left_side = 3 * (min_honest_ffg_support + remaining_honest_ffg_weight);
         let right_side = 2 * total_active_balance;
 
-        Ok(left_side >= right_side)
+        let ok = left_side >= right_side;
+        debug!(
+            checkpoint_root = %checkpoint.root,
+            checkpoint_epoch = checkpoint.epoch.as_u64(),
+            ffg_support_for_checkpoint = ffg_support_for_checkpoint,
+            ffg_weight_till_now = ffg_weight_till_now,
+            remaining_ffg_weight = remaining_ffg_weight,
+            remaining_honest_ffg_weight = remaining_honest_ffg_weight,
+            min_byzantine_weight = min_byzantine_weight,
+            min_honest_ffg_support = min_honest_ffg_support,
+            left = left_side,
+            right = right_side,
+            passed = ok,
+            "FCR FFG: will_current_epoch_checkpoint_be_justified"
+        );
+        Ok(ok)
     }
 
     /// Checks if no conflicting checkpoint will be justified.
@@ -1650,7 +1834,22 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         let left_side = 3 * (min_honest_ffg_support + remaining_honest_ffg_weight);
         let right_side = total_active_balance;
 
-        Ok(left_side >= right_side)
+        let ok = left_side >= right_side;
+        debug!(
+            checkpoint_root = %checkpoint.root,
+            checkpoint_epoch = checkpoint.epoch.as_u64(),
+            ffg_support_for_checkpoint = ffg_support_for_checkpoint,
+            ffg_weight_till_now = ffg_weight_till_now,
+            remaining_ffg_weight = remaining_ffg_weight,
+            remaining_honest_ffg_weight = remaining_honest_ffg_weight,
+            min_byzantine_weight = min_byzantine_weight,
+            min_honest_ffg_support = min_honest_ffg_support,
+            left = left_side,
+            right = right_side,
+            passed = ok,
+            "FCR FFG: will_no_conflicting_checkpoint_be_justified"
+        );
+        Ok(ok)
     }
 
     /// Prunes FCR metadata to align with the DAG pruning.
@@ -1744,6 +1943,11 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         T: ForkChoiceStore<E>,
     {
         if start_slot > end_slot {
+            trace!(
+                start_slot = start_slot.as_u64(),
+                end_slot = end_slot.as_u64(),
+                "FCR W(fallback): empty range"
+            );
             return Ok(0);
         }
 
@@ -1753,6 +1957,12 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
 
         // If an entire epoch is covered by the range, return the total active balance
         if self.is_full_validator_set_covered(start_slot, end_slot) {
+            trace!(
+                start_slot = start_slot.as_u64(),
+                end_slot = end_slot.as_u64(),
+                tab = total_active_balance,
+                "FCR W(fallback): full validator set covered → TAB"
+            );
             return Ok(total_active_balance);
         }
 
@@ -1760,7 +1970,16 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             // Same epoch: simple pro-rata calculation
             let slots_covered = end_slot - start_slot + 1;
             let weight_per_slot = total_active_balance / E::slots_per_epoch();
-            Ok(weight_per_slot * slots_covered.as_u64())
+            let w = weight_per_slot * slots_covered.as_u64();
+            trace!(
+                start_slot = start_slot.as_u64(),
+                end_slot = end_slot.as_u64(),
+                slots_covered = slots_covered.as_u64(),
+                weight_per_slot = weight_per_slot,
+                w = w,
+                "FCR W(fallback): same-epoch pro-rata"
+            );
+            Ok(w)
         } else {
             // Cross-epoch boundary: complex calculation with safety adjustment
             let estimate = match self.calculate_cross_epoch_weight_estimate(
@@ -1768,17 +1987,40 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 end_slot,
                 total_active_balance,
             ) {
-                Ok(estimate) => estimate,
+                Ok(estimate) => {
+                    trace!(
+                        start_slot = start_slot.as_u64(),
+                        end_slot = end_slot.as_u64(),
+                        estimate = estimate,
+                        "FCR W(fallback): cross-epoch estimate"
+                    );
+                    estimate
+                }
                 Err(_) => {
                     // Fallback to simple calculation if cross-epoch calculation fails
                     let slots_covered = end_slot - start_slot + 1;
                     let weight_per_slot = total_active_balance / E::slots_per_epoch();
-                    weight_per_slot * slots_covered.as_u64()
+                    let w = weight_per_slot * slots_covered.as_u64();
+                    debug!(
+                        start_slot = start_slot.as_u64(),
+                        end_slot = end_slot.as_u64(),
+                        slots_covered = slots_covered.as_u64(),
+                        weight_per_slot = weight_per_slot,
+                        w = w,
+                        "FCR W(fallback): cross-epoch fallback pro-rata"
+                    );
+                    w
                 }
             };
 
             // Apply safety adjustment factor for partial epoch coverage
-            Ok(self.adjust_committee_weight_estimate_to_ensure_safety(estimate))
+            let adjusted = self.adjust_committee_weight_estimate_to_ensure_safety(estimate);
+            trace!(
+                estimate = estimate,
+                adjusted = adjusted,
+                "FCR W(fallback): safety-adjusted estimate"
+            );
+            Ok(adjusted)
             // 0.5% safety margin
         }
     }
@@ -1803,7 +2045,13 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     fn adjust_committee_weight_estimate_to_ensure_safety(&self, estimate: u64) -> u64 {
         // Apply safety adjustment: estimate * (1000 + adjustment_factor) / 1000
         // This adds a small safety margin to ensure FCR safety guarantees
-        estimate * (1000 + COMMITTEE_WEIGHT_ESTIMATION_ADJUSTMENT_FACTOR) / 1000
+        let adjusted = estimate * (1000 + COMMITTEE_WEIGHT_ESTIMATION_ADJUSTMENT_FACTOR) / 1000;
+        trace!(
+            estimate = estimate,
+            adjusted = adjusted,
+            "FCR: adjust committee weight"
+        );
+        adjusted
     }
 
     /// Checks if the slot range covers a full validator set.
@@ -1869,6 +2117,18 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 .saturating_mul(num_slots_in_start_epoch)
                 .saturating_mul(remaining_slots_in_end_epoch);
 
-        Ok(start_epoch_weight_estimate.saturating_add(end_epoch_weight_estimate))
+        let estimate = start_epoch_weight_estimate.saturating_add(end_epoch_weight_estimate);
+        trace!(
+            start_slot = start_slot.as_u64(),
+            end_slot = end_slot.as_u64(),
+            num_slots_in_end_epoch = num_slots_in_end_epoch,
+            num_slots_in_start_epoch = num_slots_in_start_epoch,
+            remaining_slots_in_end_epoch = remaining_slots_in_end_epoch,
+            end_epoch_weight_estimate = end_epoch_weight_estimate,
+            start_epoch_weight_estimate = start_epoch_weight_estimate,
+            estimate = estimate,
+            "FCR W: cross-epoch estimate components"
+        );
+        Ok(estimate)
     }
 }
