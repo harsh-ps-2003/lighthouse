@@ -427,7 +427,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             .get_block(&head_root)
             .map(|b| b.slot.as_u64())
             .unwrap_or_default();
-        debug!(
+        info!(
             slot = fc_store.get_current_slot().as_u64(),
             head = %head_root,
             head_slot = head_slot,
@@ -506,7 +506,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             .get_block(&confirmed_root)
             .map(|b| b.slot.as_u64())
             .unwrap_or_default();
-        debug!(
+        info!(
             head = %head_root,
             head_slot = head_slot,
             confirmed_initial = %confirmed_root,
@@ -639,12 +639,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         let mut found_confirmed: Option<Hash256> = None;
         while depth < MAX_REORG_DEPTH {
             if let Some(b) = proto_array.get_block(&current_root) {
-                trace!(
-                    depth = depth,
-                    block = %current_root,
-                    slot = b.slot.as_u64(),
-                    "FCR scan: visiting ancestor"
-                );
+                // FCR scan: visiting ancestor - no logging needed for routine traversal
             }
             // Check if this block is already confirmed
             if let Some(meta) = self.meta.get(&current_root) {
@@ -657,7 +652,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
 
             // Check if this block meets confirmation criteria
             let lmd_ok = self.is_one_confirmed(current_root, proto_array, fc_store)?;
-            trace!(block = %current_root, passed = lmd_ok, "FCR scan: is_one_confirmed result");
+            // FCR scan: is_one_confirmed result - no logging needed for routine checks
             if lmd_ok {
                 // Mark this block and all its descendants as confirmed
                 self.mark_confirmed(current_root, proto_array);
@@ -682,10 +677,10 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
 
         match found_confirmed {
             Some(root) => {
-                debug!(head = %head_root, confirmed_ancestor = %root, depth, "FCR update_after_find_head: confirmed ancestor")
+                info!(head = %head_root, confirmed_ancestor = %root, depth, "FCR update_after_find_head: confirmed ancestor")
             }
             None => {
-                debug!(head = %head_root, depth, "FCR update_after_find_head: no confirmed ancestor within depth")
+                info!(head = %head_root, depth, "FCR update_after_find_head: no confirmed ancestor within depth")
             }
         }
 
@@ -756,14 +751,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         } else {
             self.fcr_store.prev_slot_justified_checkpoint
         };
-        debug!(
-            block = %block_root,
-            block_slot = block.slot.as_u64(),
-            parent_slot = parent_block.slot.as_u64(),
-            weighting_checkpoint_epoch = weighting_checkpoint.epoch.as_u64(),
-            weighting_checkpoint_root = %weighting_checkpoint.root,
-            "FCR is_one_confirmed: inputs"
-        );
+        // FCR Q-indicator inputs - no logging needed for routine checks
 
         // Try to obtain the checkpoint state via the StateProvider. If unavailable, fall back
         // to pre-existing behavior that uses no checkpoint state and justified_balances.
@@ -826,14 +814,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                             let slots_covered = end_slot - start_slot + 1;
                             let weight_per_slot = total_active_balance / E::slots_per_epoch();
                             let w = weight_per_slot * slots_covered.as_u64();
-                            debug!(
-                                start_slot = start_slot.as_u64(),
-                                end_slot = end_slot.as_u64(),
-                                slots_covered = slots_covered.as_u64(),
-                                weight_per_slot = weight_per_slot,
-                                w = w,
-                                "FCR W: cross-epoch fallback pro-rata"
-                            );
+                            // FCR W: cross-epoch fallback pro-rata - no logging needed
                             w
                         }
                     };
@@ -864,17 +845,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         // Check LMD-GHOST confirmation (Q-indicator)
         let lmd_confirmed = left_side > right_side;
 
-        debug!(
-            block = %block_root,
-            support = support,
-            committee_weight = committee_weight,
-            proposer_score = proposer_score,
-            beta = beta_threshold,
-            left = left_side,
-            right = right_side,
-            passed = lmd_confirmed,
-            "FCR is_one_confirmed LMD check"
-        );
+        // FCR Q-indicator calculation - no logging needed for routine checks
 
         if lmd_confirmed {
             let slot_u64 = block.slot.as_u64();
@@ -999,11 +970,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 }
             }
         }
-        debug!(
-            parent = %parent_root,
-            descendants_confirmed = (processed.len().saturating_sub(1)),
-            "FCR: descendants marked confirmed"
-        );
+        // FCR: descendants marked confirmed - no logging needed
     }
 
     /// Finds the latest confirmed descendant along the canonical chain.
@@ -1042,14 +1009,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             .get_block(&confirmed_root)
             .map(|b| b.slot.as_u64())
             .unwrap_or_default();
-        debug!(
-            start_confirmed = %confirmed_root,
-            start_confirmed_slot = confirmed_slot,
-            head = %head_root,
-            head_slot = head_slot,
-            current_epoch = current_epoch.as_u64(),
-            "FCR find_latest_confirmed_descendant: start"
-        );
+        // FCR find_latest_confirmed_descendant: start - no logging needed
 
         // Get the confirmed block to check its epoch
         let Some(confirmed_block) = proto_array.get_block(&confirmed_root) else {
@@ -1118,7 +1078,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 .unwrap_or(false);
 
             // Gate diagnostics for previous-epoch advancement
-            debug!(
+            info!(
                 confirmed = %confirmed_root,
                 head = %head_root,
                 voting_source_epoch = voting_source_epoch.as_u64(),
@@ -1152,7 +1112,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                         let ok = self
                             .is_one_confirmed(block_root, proto_array, fc_store)
                             .ok()?;
-                        trace!(block = %block_root, slot = block.slot.as_u64(), passed = ok, "FCR prev-epoch advance step");
+                        // FCR prev-epoch advance step - no logging needed for routine checks
                         if ok {
                             current_confirmed = block_root;
                         } else {
@@ -1216,12 +1176,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                                 .will_checkpoint_be_justified(proto_array, fc_store, &checkpoint)
                                 .unwrap_or(false)
                             {
-                                trace!(
-                                    block = %block_root,
-                                    slot = block.slot.as_u64(),
-                                    checkpoint_root = %checkpoint_root,
-                                    "FCR current-epoch advance gated: checkpoint not justified"
-                                );
+                                // FCR current-epoch advance gated: checkpoint not justified - no logging needed
                                 break;
                             }
                         } else {
@@ -1232,7 +1187,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                     let ok = self
                         .is_one_confirmed(block_root, proto_array, fc_store)
                         .ok()?;
-                    trace!(block = %block_root, slot = block.slot.as_u64(), passed = ok, "FCR current-epoch advance step");
+                    // FCR current-epoch advance step - no logging needed for routine checks
                     if ok {
                         tentative_confirmed = block_root;
                     } else {
@@ -1274,7 +1229,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                             .epoch,
                     );
                 let ok = voting_source_epoch + 2 >= current_epoch;
-                debug!(
+                info!(
                     tentative = %tentative_confirmed,
                     head = %head_root,
                     voting_source_epoch = voting_source_epoch.as_u64(),
@@ -1287,7 +1242,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 let ok = self
                     .will_no_conflicting_checkpoint_be_justified(proto_array, fc_store, head_root)
                     .unwrap_or(false);
-                debug!(
+                info!(
                     tentative = %tentative_confirmed,
                     head = %head_root,
                     boundary = true,
@@ -1310,7 +1265,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             .get_block(&confirmed_root)
             .map(|b| b.slot.as_u64())
             .unwrap_or_default();
-        debug!(
+        info!(
             confirmed = %confirmed_root,
             confirmed_slot = final_slot,
             head = %head_root,
@@ -1367,14 +1322,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 .get_block(last)
                 .map(|b| b.slot.as_u64())
                 .unwrap_or_default();
-            trace!(
-                path_len = canonical_roots.len(),
-                start = %first,
-                start_slot = first_slot,
-                end = %last,
-                end_slot = last_slot,
-                "FCR canonical path"
-            );
+            // FCR canonical path - no logging needed for routine operations
         }
 
         Some(canonical_roots)
@@ -1617,18 +1565,12 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             Ok(Some(state)) => state,
             Ok(None) => {
                 // If checkpoint state is not available, assume it won't be justified
-                debug!(
-                    checkpoint_epoch = checkpoint.epoch.as_u64(),
-                    "FCR FFG: checkpoint state unavailable; assuming not justified"
-                );
+                // FCR FFG: checkpoint state unavailable; assuming not justified - no logging needed
                 return Ok(false);
             }
             Err(_) => {
                 // If we can't access the checkpoint state, assume it won't be justified
-                debug!(
-                    checkpoint_epoch = checkpoint.epoch.as_u64(),
-                    "FCR FFG: checkpoint state error; assuming not justified"
-                );
+                // FCR FFG: checkpoint state error; assuming not justified - no logging needed
                 return Ok(false);
             }
         };
@@ -1675,7 +1617,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         let right_side = 2 * total_active_balance;
 
         let ok = left_side >= right_side;
-        debug!(
+        info!(
             checkpoint_root = %checkpoint.root,
             checkpoint_epoch = checkpoint.epoch.as_u64(),
             ffg_support_for_checkpoint = ffg_support_for_checkpoint,
@@ -1738,18 +1680,12 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             Ok(Some(state)) => state,
             Ok(None) => {
                 // If checkpoint state is not available, assume it won't be justified
-                debug!(
-                    checkpoint_epoch = checkpoint.epoch.as_u64(),
-                    "FCR FFG: checkpoint state unavailable (no-conflict); assuming conflict possible"
-                );
+                // FCR FFG: checkpoint state unavailable (no-conflict); assuming conflict possible - no logging needed
                 return Ok(false);
             }
             Err(_) => {
                 // If we can't access the checkpoint state, assume it won't be justified
-                debug!(
-                    checkpoint_epoch = checkpoint.epoch.as_u64(),
-                    "FCR FFG: checkpoint state error (no-conflict); assuming conflict possible"
-                );
+                // FCR FFG: checkpoint state error (no-conflict); assuming conflict possible - no logging needed
                 return Ok(false);
             }
         };
@@ -1797,7 +1733,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         let right_side = total_active_balance;
 
         let ok = left_side >= right_side;
-        debug!(
+        info!(
             checkpoint_root = %checkpoint.root,
             checkpoint_epoch = checkpoint.epoch.as_u64(),
             ffg_support_for_checkpoint = ffg_support_for_checkpoint,
@@ -1870,12 +1806,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         self.fcr_store.committee_weight_lru.clear();
 
         let after = self.meta.len();
-        debug!(
-            finalized = %finalized_root,
-            pruned = (before as i64 - after as i64),
-            remaining = after,
-            "FCR: pruned side-table metadata"
-        );
+        // FCR: pruned side-table metadata - no logging needed
 
         Ok(())
     }
@@ -1937,14 +1868,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                     let slots_covered = end_slot - start_slot + 1;
                     let weight_per_slot = total_active_balance / E::slots_per_epoch();
                     let w = weight_per_slot * slots_covered.as_u64();
-                    debug!(
-                        start_slot = start_slot.as_u64(),
-                        end_slot = end_slot.as_u64(),
-                        slots_covered = slots_covered.as_u64(),
-                        weight_per_slot = weight_per_slot,
-                        w = w,
-                        "FCR W(fallback): cross-epoch fallback pro-rata"
-                    );
+                    // FCR W(fallback): cross-epoch fallback pro-rata - no logging needed
                     w
                 }
             };
