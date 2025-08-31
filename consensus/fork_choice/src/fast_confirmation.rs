@@ -756,7 +756,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         } else {
             self.fcr_store.prev_slot_justified_checkpoint
         };
-        trace!(
+        debug!(
             block = %block_root,
             block_slot = block.slot.as_u64(),
             parent_slot = parent_block.slot.as_u64(),
@@ -802,19 +802,8 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 .unwrap_or(fc_store.justified_balances().total_effective_balance);
 
             if start_slot > end_slot {
-                trace!(
-                    start_slot = start_slot.as_u64(),
-                    end_slot = end_slot.as_u64(),
-                    "FCR W: empty range (start > end)"
-                );
                 0
             } else if self.is_full_validator_set_covered(start_slot, end_slot) {
-                trace!(
-                    start_slot = start_slot.as_u64(),
-                    end_slot = end_slot.as_u64(),
-                    tab = total_active_balance,
-                    "FCR W: full validator set covered → TAB"
-                );
                 total_active_balance
             } else {
                 let start_epoch = start_slot.epoch(E::slots_per_epoch());
@@ -823,14 +812,6 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                     let slots_covered = end_slot - start_slot + 1;
                     let weight_per_slot = total_active_balance / E::slots_per_epoch();
                     let w = weight_per_slot * slots_covered.as_u64();
-                    trace!(
-                        start_slot = start_slot.as_u64(),
-                        end_slot = end_slot.as_u64(),
-                        slots_covered = slots_covered.as_u64(),
-                        weight_per_slot = weight_per_slot,
-                        w = w,
-                        "FCR W: same-epoch pro-rata"
-                    );
                     w
                 } else {
                     // Cross-epoch boundary calculation with safety adjustment
@@ -839,15 +820,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                         end_slot,
                         total_active_balance,
                     ) {
-                        Ok(estimate) => {
-                            trace!(
-                                start_slot = start_slot.as_u64(),
-                                end_slot = end_slot.as_u64(),
-                                estimate = estimate,
-                                "FCR W: cross-epoch estimate"
-                            );
-                            estimate
-                        }
+                        Ok(estimate) => estimate,
                         Err(_) => {
                             // Conservative fallback
                             let slots_covered = end_slot - start_slot + 1;
@@ -865,23 +838,12 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                         }
                     };
                     let adjusted = self.adjust_committee_weight_estimate_to_ensure_safety(estimate);
-                    trace!(
-                        estimate = estimate,
-                        adjusted = adjusted,
-                        "FCR W: safety-adjusted estimate"
-                    );
                     adjusted
                 }
             }
         } else {
             // Fallback: use the existing method which relies on justified_balances
             let w = self.get_committee_weight_between_slots(start_slot, end_slot, fc_store)?;
-            trace!(
-                start_slot = start_slot.as_u64(),
-                end_slot = end_slot.as_u64(),
-                w = w,
-                "FCR W: fc_store fallback"
-            );
             w
         };
 
@@ -1943,11 +1905,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         T: ForkChoiceStore<E>,
     {
         if start_slot > end_slot {
-            trace!(
-                start_slot = start_slot.as_u64(),
-                end_slot = end_slot.as_u64(),
-                "FCR W(fallback): empty range"
-            );
+            // Empty range - no logging needed
             return Ok(0);
         }
 
@@ -1957,12 +1915,6 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
 
         // If an entire epoch is covered by the range, return the total active balance
         if self.is_full_validator_set_covered(start_slot, end_slot) {
-            trace!(
-                start_slot = start_slot.as_u64(),
-                end_slot = end_slot.as_u64(),
-                tab = total_active_balance,
-                "FCR W(fallback): full validator set covered → TAB"
-            );
             return Ok(total_active_balance);
         }
 
@@ -1971,14 +1923,6 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             let slots_covered = end_slot - start_slot + 1;
             let weight_per_slot = total_active_balance / E::slots_per_epoch();
             let w = weight_per_slot * slots_covered.as_u64();
-            trace!(
-                start_slot = start_slot.as_u64(),
-                end_slot = end_slot.as_u64(),
-                slots_covered = slots_covered.as_u64(),
-                weight_per_slot = weight_per_slot,
-                w = w,
-                "FCR W(fallback): same-epoch pro-rata"
-            );
             Ok(w)
         } else {
             // Cross-epoch boundary: complex calculation with safety adjustment
@@ -1987,15 +1931,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 end_slot,
                 total_active_balance,
             ) {
-                Ok(estimate) => {
-                    trace!(
-                        start_slot = start_slot.as_u64(),
-                        end_slot = end_slot.as_u64(),
-                        estimate = estimate,
-                        "FCR W(fallback): cross-epoch estimate"
-                    );
-                    estimate
-                }
+                Ok(estimate) => estimate,
                 Err(_) => {
                     // Fallback to simple calculation if cross-epoch calculation fails
                     let slots_covered = end_slot - start_slot + 1;
@@ -2015,11 +1951,6 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
 
             // Apply safety adjustment factor for partial epoch coverage
             let adjusted = self.adjust_committee_weight_estimate_to_ensure_safety(estimate);
-            trace!(
-                estimate = estimate,
-                adjusted = adjusted,
-                "FCR W(fallback): safety-adjusted estimate"
-            );
             Ok(adjusted)
             // 0.5% safety margin
         }
@@ -2046,11 +1977,6 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         // Apply safety adjustment: estimate * (1000 + adjustment_factor) / 1000
         // This adds a small safety margin to ensure FCR safety guarantees
         let adjusted = estimate * (1000 + COMMITTEE_WEIGHT_ESTIMATION_ADJUSTMENT_FACTOR) / 1000;
-        trace!(
-            estimate = estimate,
-            adjusted = adjusted,
-            "FCR: adjust committee weight"
-        );
         adjusted
     }
 
@@ -2118,17 +2044,6 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 .saturating_mul(remaining_slots_in_end_epoch);
 
         let estimate = start_epoch_weight_estimate.saturating_add(end_epoch_weight_estimate);
-        trace!(
-            start_slot = start_slot.as_u64(),
-            end_slot = end_slot.as_u64(),
-            num_slots_in_end_epoch = num_slots_in_end_epoch,
-            num_slots_in_start_epoch = num_slots_in_start_epoch,
-            remaining_slots_in_end_epoch = remaining_slots_in_end_epoch,
-            end_epoch_weight_estimate = end_epoch_weight_estimate,
-            start_epoch_weight_estimate = start_epoch_weight_estimate,
-            estimate = estimate,
-            "FCR W: cross-epoch estimate components"
-        );
         Ok(estimate)
     }
 }
