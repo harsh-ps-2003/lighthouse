@@ -1101,7 +1101,14 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             .get_block(&confirmed_root)
             .map(|b| b.slot.as_u64())
             .unwrap_or_default();
-        // FCR find_latest_confirmed_descendant: start - no logging needed
+        info!(
+            start_confirmed = %confirmed_root,
+            start_confirmed_slot = confirmed_slot,
+            head = %head_root,
+            head_slot = head_slot,
+            current_epoch = current_epoch.as_u64(),
+            "FCR find_latest_confirmed_descendant: start"
+        );
 
         // Get the confirmed block to check its epoch
         let Some(confirmed_block) = proto_array.get_block(&confirmed_root) else {
