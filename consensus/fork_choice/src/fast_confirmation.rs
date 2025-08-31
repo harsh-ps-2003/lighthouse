@@ -1987,7 +1987,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         T: ForkChoiceStore<E>,
     {
         if start_slot > end_slot {
-            info!(
+            debug!(
                 start_slot = start_slot.as_u64(),
                 end_slot = end_slot.as_u64(),
                 "FCR W(fallback): empty range"
@@ -2001,7 +2001,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
 
         // If an entire epoch is covered by the range, return the total active balance
         if self.is_full_validator_set_covered(start_slot, end_slot) {
-            info!(
+            debug!(
                 start_slot = start_slot.as_u64(),
                 end_slot = end_slot.as_u64(),
                 tab = total_active_balance,
@@ -2015,7 +2015,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             let slots_covered = end_slot - start_slot + 1;
             let weight_per_slot = total_active_balance / E::slots_per_epoch();
             let w = weight_per_slot * slots_covered.as_u64();
-            info!(
+            debug!(
                 start_slot = start_slot.as_u64(),
                 end_slot = end_slot.as_u64(),
                 slots_covered = slots_covered.as_u64(),
@@ -2037,7 +2037,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                     let slots_covered = end_slot - start_slot + 1;
                     let weight_per_slot = total_active_balance / E::slots_per_epoch();
                     let w = weight_per_slot * slots_covered.as_u64();
-                    info!(
+                    debug!(
                         start_slot = start_slot.as_u64(),
                         end_slot = end_slot.as_u64(),
                         estimate = w,
@@ -2049,7 +2049,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
 
             // Apply safety adjustment factor for partial epoch coverage
             let adjusted = self.adjust_committee_weight_estimate_to_ensure_safety(estimate);
-            info!(
+            debug!(
                 start_slot = start_slot.as_u64(),
                 end_slot = end_slot.as_u64(),
                 estimate = estimate,
