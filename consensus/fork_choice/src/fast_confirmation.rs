@@ -16,7 +16,7 @@ use std::error::Error;
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use types::{
     BeaconState, ChainSpec, Checkpoint, Epoch, EthSpec, FixedBytesExtended, Hash256, Slot,
 };
@@ -506,7 +506,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             .get_block(&confirmed_root)
             .map(|b| b.slot.as_u64())
             .unwrap_or_default();
-        info!(
+        debug!(
             head = %head_root,
             head_slot = head_slot,
             confirmed_initial = %confirmed_root,
@@ -588,7 +588,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 );
             }
         } else {
-            info!(
+            debug!(
                 current_slot = fc_store.get_current_slot().as_u64(),
                 slots_per_epoch = E::slots_per_epoch(),
                 "FCR: not at epoch boundary, skipping uplift check"
@@ -664,7 +664,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         let mut found_confirmed: Option<Hash256> = None;
         while depth < MAX_REORG_DEPTH {
             if let Some(b) = proto_array.get_block(&current_root) {
-                info!(
+                debug!(
                     depth = depth,
                     block = %current_root,
                     slot = b.slot.as_u64(),
@@ -682,7 +682,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
 
             // Check if this block meets confirmation criteria
             let lmd_ok = self.is_one_confirmed(current_root, proto_array, fc_store)?;
-            info!(
+            debug!(
                 depth = depth,
                 block = %current_root,
                 passed = lmd_ok,
@@ -715,7 +715,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 info!(head = %head_root, confirmed_ancestor = %root, depth, "FCR update_after_find_head: confirmed ancestor")
             }
             None => {
-                info!(head = %head_root, depth, "FCR update_after_find_head: no confirmed ancestor within depth")
+                debug!(head = %head_root, depth, "FCR update_after_find_head: no confirmed ancestor within depth")
             }
         }
 
@@ -786,7 +786,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         } else {
             self.fcr_store.prev_slot_justified_checkpoint
         };
-        info!(
+        debug!(
             block = %block_root,
             block_slot = block.slot.as_u64(),
             parent_slot = parent_block.slot.as_u64(),
@@ -832,14 +832,14 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 .unwrap_or(fc_store.justified_balances().total_effective_balance);
 
             if start_slot > end_slot {
-                info!(
+                debug!(
                     start_slot = start_slot.as_u64(),
                     end_slot = end_slot.as_u64(),
                     "FCR W: empty range (start > end)"
                 );
                 0
             } else if self.is_full_validator_set_covered(start_slot, end_slot) {
-                info!(
+                debug!(
                     start_slot = start_slot.as_u64(),
                     end_slot = end_slot.as_u64(),
                     tab = total_active_balance,
@@ -853,7 +853,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                     let slots_covered = end_slot - start_slot + 1;
                     let weight_per_slot = total_active_balance / E::slots_per_epoch();
                     let w = weight_per_slot * slots_covered.as_u64();
-                    info!(
+                    debug!(
                         start_slot = start_slot.as_u64(),
                         end_slot = end_slot.as_u64(),
                         slots_covered = slots_covered.as_u64(),
@@ -875,7 +875,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                             let slots_covered = end_slot - start_slot + 1;
                             let weight_per_slot = total_active_balance / E::slots_per_epoch();
                             let w = weight_per_slot * slots_covered.as_u64();
-                            info!(
+                            debug!(
                                 start_slot = start_slot.as_u64(),
                                 end_slot = end_slot.as_u64(),
                                 estimate = w,
@@ -885,7 +885,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                         }
                     };
                     let adjusted = self.adjust_committee_weight_estimate_to_ensure_safety(estimate);
-                    info!(
+                    debug!(
                         start_slot = start_slot.as_u64(),
                         end_slot = end_slot.as_u64(),
                         estimate = estimate,
@@ -897,7 +897,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             }
         } else {
             // Fallback: use the existing method which relies on justified_balances
-            info!(
+            debug!(
                 start_slot = start_slot.as_u64(),
                 end_slot = end_slot.as_u64(),
                 "FCR W: using fc_store fallback (no checkpoint state)"
@@ -923,7 +923,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         // Check LMD-GHOST confirmation (Q-indicator)
         let lmd_confirmed = left_side > right_side;
 
-        info!(
+        debug!(
             block = %block_root,
             support = support,
             committee_weight = committee_weight,
@@ -938,7 +938,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         if lmd_confirmed {
             let slot_u64 = block.slot.as_u64();
             let epoch_u64 = block.slot.epoch(E::slots_per_epoch()).as_u64();
-            info!(
+            debug!(
                 block = %block_root,
                 slot = slot_u64,
                 epoch = epoch_u64,
@@ -990,14 +990,14 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         if let Some(block) = proto_array.get_block(&block_root) {
             let slot_u64 = block.slot.as_u64();
             let epoch_u64 = block.slot.epoch(E::slots_per_epoch()).as_u64();
-            info!(
+            debug!(
                 block = %block_root,
                 slot = slot_u64,
                 epoch = epoch_u64,
                 "FCR: block confirmed"
             );
         } else {
-            info!(block = %block_root, "FCR: block confirmed");
+            debug!(block = %block_root, "FCR: block confirmed");
         }
 
         // Mark all descendants as confirmed
@@ -1058,7 +1058,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 }
             }
         }
-        info!(
+        debug!(
             parent = %parent_root,
             descendants_confirmed = (processed.len().saturating_sub(1)),
             "FCR: descendants marked confirmed"
@@ -1101,7 +1101,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             .get_block(&confirmed_root)
             .map(|b| b.slot.as_u64())
             .unwrap_or_default();
-        info!(
+        debug!(
             start_confirmed = %confirmed_root,
             start_confirmed_slot = confirmed_slot,
             head = %head_root,
@@ -1146,7 +1146,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                             .prev_slot_unrealized_justified_checkpoint
                             .epoch,
                     );
-                info!(
+                debug!(
                     prev_slot_head = %self.fcr_store.prev_slot_head,
                     voting_source_epoch = max_epoch.as_u64(),
                     current_epoch = current_epoch.as_u64(),
@@ -1183,7 +1183,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 .map(|e| e + 1 >= current_epoch)
                 .unwrap_or(false);
             
-            info!(
+            debug!(
                 prev_slot_head = %self.fcr_store.prev_slot_head,
                 head = %head_root,
                 uj_prev_epoch = proto_array
@@ -1202,7 +1202,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             );
 
             // Gate diagnostics for previous-epoch advancement
-            info!(
+            debug!(
                 confirmed = %confirmed_root,
                 head = %head_root,
                 voting_source_epoch = voting_source_epoch.as_u64(),
@@ -1236,7 +1236,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                         let ok = self
                             .is_one_confirmed(block_root, proto_array, fc_store)
                             .ok()?;
-                        info!(
+                        debug!(
                             block = %block_root,
                             slot = block.slot.as_u64(),
                             passed = ok,
@@ -1305,7 +1305,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                                 .will_checkpoint_be_justified(proto_array, fc_store, &checkpoint)
                                 .unwrap_or(false)
                             {
-                                info!(
+                                debug!(
                                     block = %block_root,
                                     slot = block.slot.as_u64(),
                                     checkpoint_root = %checkpoint_root,
@@ -1321,7 +1321,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                     let ok = self
                         .is_one_confirmed(block_root, proto_array, fc_store)
                         .ok()?;
-                    info!(
+                    debug!(
                         block = %block_root,
                         slot = block.slot.as_u64(),
                         passed = ok,
@@ -1368,7 +1368,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                             .epoch,
                     );
                 let ok = voting_source_epoch + 2 >= current_epoch;
-                info!(
+                debug!(
                     tentative = %tentative_confirmed,
                     head = %head_root,
                     voting_source_epoch = voting_source_epoch.as_u64(),
@@ -1381,7 +1381,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 let ok = self
                     .will_no_conflicting_checkpoint_be_justified(proto_array, fc_store, head_root)
                     .unwrap_or(false);
-                info!(
+                debug!(
                     tentative = %tentative_confirmed,
                     head = %head_root,
                     boundary = true,
@@ -1404,7 +1404,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             .get_block(&confirmed_root)
             .map(|b| b.slot.as_u64())
             .unwrap_or_default();
-        info!(
+        debug!(
             confirmed = %confirmed_root,
             confirmed_slot = final_slot,
             head = %head_root,
@@ -1461,7 +1461,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 .get_block(last)
                 .map(|b| b.slot.as_u64())
                 .unwrap_or_default();
-            info!(
+            debug!(
                 path_len = canonical_roots.len(),
                 start = %first,
                 start_slot = first_slot,
@@ -2082,7 +2082,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         // Apply safety adjustment: estimate * (1000 + adjustment_factor) / 1000
         // This adds a small safety margin to ensure FCR safety guarantees
         let adjusted = estimate * (1000 + COMMITTEE_WEIGHT_ESTIMATION_ADJUSTMENT_FACTOR) / 1000;
-        info!(
+        debug!(
             estimate = estimate,
             adjusted = adjusted,
             adjustment_factor = COMMITTEE_WEIGHT_ESTIMATION_ADJUSTMENT_FACTOR,
@@ -2155,7 +2155,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 .saturating_mul(remaining_slots_in_end_epoch);
 
         let estimate = start_epoch_weight_estimate.saturating_add(end_epoch_weight_estimate);
-        info!(
+        debug!(
             start_slot = start_slot.as_u64(),
             end_slot = end_slot.as_u64(),
             num_slots_in_end_epoch = num_slots_in_end_epoch,
