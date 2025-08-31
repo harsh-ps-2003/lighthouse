@@ -16,7 +16,7 @@ use std::error::Error;
 use std::marker::PhantomData;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
-use tracing::{debug, info, trace, warn};
+use tracing::{info, warn};
 use types::{
     BeaconState, ChainSpec, Checkpoint, Epoch, EthSpec, FixedBytesExtended, Hash256, Slot,
 };
@@ -551,6 +551,13 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             // Use the prev-slot unrealized justified checkpoint per spec
             let prev_uj = self.fcr_store.prev_slot_unrealized_justified_checkpoint;
             let prev_uj_epoch = prev_uj.epoch;
+            info!(
+                current_slot = fc_store.get_current_slot().as_u64(),
+                prev_uj_epoch = prev_uj_epoch.as_u64(),
+                current_epoch = current_epoch.as_u64(),
+                epoch_boundary = true,
+                "FCR: checking epoch-start uplift conditions"
+            );
             if prev_uj_epoch + 1 == current_epoch {
                 if let (Some(confirmed_block), Some(prev_uj_block)) = (
                     proto_array.get_block(&confirmed_root),
@@ -565,9 +572,27 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                             "FCR: epoch-start uplift to prev-slot unrealized justified checkpoint"
                         );
                         confirmed_root = prev_uj.root;
+                    } else {
+                        info!(
+                            prev_uj_slot = prev_uj_block.slot.as_u64(),
+                            confirmed_slot = confirmed_block.slot.as_u64(),
+                            "FCR: no epoch-start uplift needed (confirmed already ahead)"
+                        );
                     }
                 }
+            } else {
+                info!(
+                    prev_uj_epoch = prev_uj_epoch.as_u64(),
+                    current_epoch = current_epoch.as_u64(),
+                    "FCR: epoch-start uplift not applicable (epoch mismatch)"
+                );
             }
+        } else {
+            info!(
+                current_slot = fc_store.get_current_slot().as_u64(),
+                slots_per_epoch = E::slots_per_epoch(),
+                "FCR: not at epoch boundary, skipping uplift check"
+            );
         }
 
         // Try to advance the confirmed root along the canonical chain
@@ -639,7 +664,12 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         let mut found_confirmed: Option<Hash256> = None;
         while depth < MAX_REORG_DEPTH {
             if let Some(b) = proto_array.get_block(&current_root) {
-                // FCR scan: visiting ancestor - no logging needed for routine traversal
+                info!(
+                    depth = depth,
+                    block = %current_root,
+                    slot = b.slot.as_u64(),
+                    "FCR scan: visiting ancestor"
+                );
             }
             // Check if this block is already confirmed
             if let Some(meta) = self.meta.get(&current_root) {
@@ -652,7 +682,12 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
 
             // Check if this block meets confirmation criteria
             let lmd_ok = self.is_one_confirmed(current_root, proto_array, fc_store)?;
-            // FCR scan: is_one_confirmed result - no logging needed for routine checks
+            info!(
+                depth = depth,
+                block = %current_root,
+                passed = lmd_ok,
+                "FCR scan: is_one_confirmed result"
+            );
             if lmd_ok {
                 // Mark this block and all its descendants as confirmed
                 self.mark_confirmed(current_root, proto_array);
@@ -751,7 +786,14 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         } else {
             self.fcr_store.prev_slot_justified_checkpoint
         };
-        // FCR Q-indicator inputs - no logging needed for routine checks
+        info!(
+            block = %block_root,
+            block_slot = block.slot.as_u64(),
+            parent_slot = parent_block.slot.as_u64(),
+            weighting_checkpoint_epoch = weighting_checkpoint.epoch.as_u64(),
+            weighting_checkpoint_root = %weighting_checkpoint.root,
+            "FCR Q-indicator: inputs"
+        );
 
         // Try to obtain the checkpoint state via the StateProvider. If unavailable, fall back
         // to pre-existing behavior that uses no checkpoint state and justified_balances.
@@ -790,8 +832,19 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 .unwrap_or(fc_store.justified_balances().total_effective_balance);
 
             if start_slot > end_slot {
+                info!(
+                    start_slot = start_slot.as_u64(),
+                    end_slot = end_slot.as_u64(),
+                    "FCR W: empty range (start > end)"
+                );
                 0
             } else if self.is_full_validator_set_covered(start_slot, end_slot) {
+                info!(
+                    start_slot = start_slot.as_u64(),
+                    end_slot = end_slot.as_u64(),
+                    tab = total_active_balance,
+                    "FCR W: full validator set covered → TAB"
+                );
                 total_active_balance
             } else {
                 let start_epoch = start_slot.epoch(E::slots_per_epoch());
@@ -800,6 +853,14 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                     let slots_covered = end_slot - start_slot + 1;
                     let weight_per_slot = total_active_balance / E::slots_per_epoch();
                     let w = weight_per_slot * slots_covered.as_u64();
+                    info!(
+                        start_slot = start_slot.as_u64(),
+                        end_slot = end_slot.as_u64(),
+                        slots_covered = slots_covered.as_u64(),
+                        weight_per_slot = weight_per_slot,
+                        w = w,
+                        "FCR W: same-epoch pro-rata"
+                    );
                     w
                 } else {
                     // Cross-epoch boundary calculation with safety adjustment
@@ -814,16 +875,33 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                             let slots_covered = end_slot - start_slot + 1;
                             let weight_per_slot = total_active_balance / E::slots_per_epoch();
                             let w = weight_per_slot * slots_covered.as_u64();
-                            // FCR W: cross-epoch fallback pro-rata - no logging needed
+                            info!(
+                                start_slot = start_slot.as_u64(),
+                                end_slot = end_slot.as_u64(),
+                                estimate = w,
+                                "FCR W: cross-epoch fallback pro-rata"
+                            );
                             w
                         }
                     };
                     let adjusted = self.adjust_committee_weight_estimate_to_ensure_safety(estimate);
+                    info!(
+                        start_slot = start_slot.as_u64(),
+                        end_slot = end_slot.as_u64(),
+                        estimate = estimate,
+                        adjusted = adjusted,
+                        "FCR W: cross-epoch estimate with safety adjustment"
+                    );
                     adjusted
                 }
             }
         } else {
             // Fallback: use the existing method which relies on justified_balances
+            info!(
+                start_slot = start_slot.as_u64(),
+                end_slot = end_slot.as_u64(),
+                "FCR W: using fc_store fallback (no checkpoint state)"
+            );
             let w = self.get_committee_weight_between_slots(start_slot, end_slot, fc_store)?;
             w
         };
@@ -845,7 +923,17 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         // Check LMD-GHOST confirmation (Q-indicator)
         let lmd_confirmed = left_side > right_side;
 
-        // FCR Q-indicator calculation - no logging needed for routine checks
+        info!(
+            block = %block_root,
+            support = support,
+            committee_weight = committee_weight,
+            proposer_score = proposer_score,
+            beta = beta_threshold,
+            left = left_side,
+            right = right_side,
+            passed = lmd_confirmed,
+            "FCR Q-indicator: LMD-GHOST check"
+        );
 
         if lmd_confirmed {
             let slot_u64 = block.slot.as_u64();
@@ -970,7 +1058,11 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 }
             }
         }
-        // FCR: descendants marked confirmed - no logging needed
+        info!(
+            parent = %parent_root,
+            descendants_confirmed = (processed.len().saturating_sub(1)),
+            "FCR: descendants marked confirmed"
+        );
     }
 
     /// Finds the latest confirmed descendant along the canonical chain.
@@ -1038,7 +1130,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                         }
                     }
                 }
-                epoch_to_weight
+                let max_epoch = epoch_to_weight
                     .into_iter()
                     .max_by_key(|(_, w)| *w)
                     .map(|(e, _)| e)
@@ -1046,7 +1138,14 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                         self.fcr_store
                             .prev_slot_unrealized_justified_checkpoint
                             .epoch,
-                    )
+                    );
+                info!(
+                    prev_slot_head = %self.fcr_store.prev_slot_head,
+                    voting_source_epoch = max_epoch.as_u64(),
+                    current_epoch = current_epoch.as_u64(),
+                    "FCR: computed voting source epoch for prev-slot head"
+                );
+                max_epoch
             };
 
             let voting_source_ok = voting_source_epoch + 2 >= current_epoch;
@@ -1076,6 +1175,24 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 })
                 .map(|e| e + 1 >= current_epoch)
                 .unwrap_or(false);
+            
+            info!(
+                prev_slot_head = %self.fcr_store.prev_slot_head,
+                head = %head_root,
+                uj_prev_epoch = proto_array
+                    .get_block(&self.fcr_store.prev_slot_head)
+                    .and_then(|b| b.unrealized_justified_checkpoint.as_ref().map(|cp| cp.epoch))
+                    .map(|e| e.as_u64())
+                    .unwrap_or_default(),
+                uj_head_epoch = proto_array
+                    .get_block(&head_root)
+                    .and_then(|b| b.unrealized_justified_checkpoint.as_ref().map(|cp| cp.epoch))
+                    .map(|e| e.as_u64())
+                    .unwrap_or_default(),
+                uj_prev = uj_prev,
+                uj_head = uj_head,
+                "FCR: unrealized justification epoch analysis"
+            );
 
             // Gate diagnostics for previous-epoch advancement
             info!(
@@ -1112,7 +1229,12 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                         let ok = self
                             .is_one_confirmed(block_root, proto_array, fc_store)
                             .ok()?;
-                        // FCR prev-epoch advance step - no logging needed for routine checks
+                        info!(
+                            block = %block_root,
+                            slot = block.slot.as_u64(),
+                            passed = ok,
+                            "FCR prev-epoch advance step"
+                        );
                         if ok {
                             current_confirmed = block_root;
                         } else {
@@ -1176,7 +1298,12 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                                 .will_checkpoint_be_justified(proto_array, fc_store, &checkpoint)
                                 .unwrap_or(false)
                             {
-                                // FCR current-epoch advance gated: checkpoint not justified - no logging needed
+                                info!(
+                                    block = %block_root,
+                                    slot = block.slot.as_u64(),
+                                    checkpoint_root = %checkpoint_root,
+                                    "FCR current-epoch advance gated: checkpoint not justified"
+                                );
                                 break;
                             }
                         } else {
@@ -1187,7 +1314,12 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                     let ok = self
                         .is_one_confirmed(block_root, proto_array, fc_store)
                         .ok()?;
-                    // FCR current-epoch advance step - no logging needed for routine checks
+                    info!(
+                        block = %block_root,
+                        slot = block.slot.as_u64(),
+                        passed = ok,
+                        "FCR current-epoch advance step"
+                    );
                     if ok {
                         tentative_confirmed = block_root;
                     } else {
@@ -1322,7 +1454,14 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 .get_block(last)
                 .map(|b| b.slot.as_u64())
                 .unwrap_or_default();
-            // FCR canonical path - no logging needed for routine operations
+            info!(
+                path_len = canonical_roots.len(),
+                start = %first,
+                start_slot = first_slot,
+                end = %last,
+                end_slot = last_slot,
+                "FCR canonical path"
+            );
         }
 
         Some(canonical_roots)
@@ -1806,7 +1945,12 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         self.fcr_store.committee_weight_lru.clear();
 
         let after = self.meta.len();
-        // FCR: pruned side-table metadata - no logging needed
+        info!(
+            finalized = %finalized_root,
+            pruned = (before as i64 - after as i64),
+            remaining = after,
+            "FCR: pruned side-table metadata"
+        );
 
         Ok(())
     }
@@ -1836,7 +1980,11 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         T: ForkChoiceStore<E>,
     {
         if start_slot > end_slot {
-            // Empty range - no logging needed
+            info!(
+                start_slot = start_slot.as_u64(),
+                end_slot = end_slot.as_u64(),
+                "FCR W(fallback): empty range"
+            );
             return Ok(0);
         }
 
@@ -1846,6 +1994,12 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
 
         // If an entire epoch is covered by the range, return the total active balance
         if self.is_full_validator_set_covered(start_slot, end_slot) {
+            info!(
+                start_slot = start_slot.as_u64(),
+                end_slot = end_slot.as_u64(),
+                tab = total_active_balance,
+                "FCR W(fallback): full validator set covered → TAB"
+            );
             return Ok(total_active_balance);
         }
 
@@ -1854,6 +2008,14 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             let slots_covered = end_slot - start_slot + 1;
             let weight_per_slot = total_active_balance / E::slots_per_epoch();
             let w = weight_per_slot * slots_covered.as_u64();
+            info!(
+                start_slot = start_slot.as_u64(),
+                end_slot = end_slot.as_u64(),
+                slots_covered = slots_covered.as_u64(),
+                weight_per_slot = weight_per_slot,
+                w = w,
+                "FCR W(fallback): same-epoch pro-rata"
+            );
             Ok(w)
         } else {
             // Cross-epoch boundary: complex calculation with safety adjustment
@@ -1868,13 +2030,25 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                     let slots_covered = end_slot - start_slot + 1;
                     let weight_per_slot = total_active_balance / E::slots_per_epoch();
                     let w = weight_per_slot * slots_covered.as_u64();
-                    // FCR W(fallback): cross-epoch fallback pro-rata - no logging needed
+                    info!(
+                        start_slot = start_slot.as_u64(),
+                        end_slot = end_slot.as_u64(),
+                        estimate = w,
+                        "FCR W(fallback): cross-epoch fallback pro-rata"
+                    );
                     w
                 }
             };
 
             // Apply safety adjustment factor for partial epoch coverage
             let adjusted = self.adjust_committee_weight_estimate_to_ensure_safety(estimate);
+            info!(
+                start_slot = start_slot.as_u64(),
+                end_slot = end_slot.as_u64(),
+                estimate = estimate,
+                adjusted = adjusted,
+                "FCR W(fallback): cross-epoch estimate with safety adjustment"
+            );
             Ok(adjusted)
             // 0.5% safety margin
         }
@@ -1901,6 +2075,12 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         // Apply safety adjustment: estimate * (1000 + adjustment_factor) / 1000
         // This adds a small safety margin to ensure FCR safety guarantees
         let adjusted = estimate * (1000 + COMMITTEE_WEIGHT_ESTIMATION_ADJUSTMENT_FACTOR) / 1000;
+        info!(
+            estimate = estimate,
+            adjusted = adjusted,
+            adjustment_factor = COMMITTEE_WEIGHT_ESTIMATION_ADJUSTMENT_FACTOR,
+            "FCR: adjust committee weight estimate to ensure safety"
+        );
         adjusted
     }
 
@@ -1968,6 +2148,17 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 .saturating_mul(remaining_slots_in_end_epoch);
 
         let estimate = start_epoch_weight_estimate.saturating_add(end_epoch_weight_estimate);
+        info!(
+            start_slot = start_slot.as_u64(),
+            end_slot = end_slot.as_u64(),
+            num_slots_in_end_epoch = num_slots_in_end_epoch,
+            num_slots_in_start_epoch = num_slots_in_start_epoch,
+            remaining_slots_in_end_epoch = remaining_slots_in_end_epoch,
+            end_epoch_weight_estimate = end_epoch_weight_estimate,
+            start_epoch_weight_estimate = start_epoch_weight_estimate,
+            estimate = estimate,
+            "FCR W: cross-epoch estimate components"
+        );
         Ok(estimate)
     }
 }
