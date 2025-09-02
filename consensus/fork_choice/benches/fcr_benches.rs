@@ -53,9 +53,6 @@ fn bench_full_validator_set_covered(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, bench_adjust, bench_cross_epoch_estimate, bench_ffg_weight, bench_full_validator_set_covered);
-criterion_main!(benches);
-
 fn bench_is_one_confirmed_math(c: &mut Criterion) {
     let mut g = c.benchmark_group("fcr/is_one_confirmed_math");
     // (S, W, proposer_score, beta%)
@@ -103,10 +100,138 @@ fn bench_is_one_confirmed_w_estimate(c: &mut Criterion) {
     }
 }
 
+// Fork choice integration overhead benchmarks
+fn bench_fork_choice_overhead(c: &mut Criterion) {
+    let mut g = c.benchmark_group("fcr/fork_choice_overhead");
+    
+    // Test FCR overhead on get_head() operations
+    g.bench_function("get_head_with_fcr", |b| {
+        b.iter(|| {
+            // This would test the actual get_head() with FCR enabled
+            // For now, we'll benchmark the FCR update hook
+            fcb::bench_update_fcr_after_find_head()
+        });
+    });
+    
+    g.bench_function("get_head_without_fcr", |b| {
+        b.iter(|| {
+            // This would test get_head() without FCR
+            // For now, we'll benchmark a no-op
+            fcb::bench_no_op()
+        });
+    });
+}
+
+// Validator scaling benchmarks
+fn bench_validator_scaling(c: &mut Criterion) {
+    let mut g = c.benchmark_group("fcr/validator_scaling");
+    
+    // Test with different validator counts: 100K, 500K, 1M+
+    let validator_counts = [100_000u64, 500_000u64, 1_000_000u64];
+    
+    for &count in &validator_counts {
+        g.bench_with_input(BenchmarkId::new("committee_weight", count), &count, |b, &count| {
+            b.iter(|| fcb::bench_committee_weight_with_validators(count))
+        });
+        
+        g.bench_with_input(BenchmarkId::new("ffg_support", count), &count, |b, &count| {
+            b.iter(|| fcb::bench_ffg_support_with_validators(count))
+        });
+    }
+}
+
+// Memory usage benchmarks
+fn bench_memory_usage(c: &mut Criterion) {
+    let mut g = c.benchmark_group("fcr/memory_usage");
+    
+    // Test FCR metadata HashMap growth
+    g.bench_function("metadata_growth", |b| {
+        b.iter(|| fcb::bench_fcr_metadata_growth())
+    });
+    
+    // Test pruning effectiveness
+    g.bench_function("pruning_effectiveness", |b| {
+        b.iter(|| fcb::bench_fcr_pruning())
+    });
+    
+    // Test memory usage vs validator count
+    let validator_counts = [100_000u64, 500_000u64, 1_000_000u64];
+    for &count in &validator_counts {
+        g.bench_with_input(BenchmarkId::new("memory_vs_validators", count), &count, |b, &count| {
+            b.iter(|| fcb::bench_memory_usage_with_validators(count))
+        });
+    }
+}
+
+// Production scenario benchmarks
+fn bench_production_scenarios(c: &mut Criterion) {
+    let mut g = c.benchmark_group("fcr/production_scenarios");
+    
+    // Test epoch boundary transitions
+    g.bench_function("epoch_boundary_transition", |b| {
+        b.iter(|| fcb::bench_epoch_boundary_transition())
+    });
+    
+    // Test reorg scenarios
+    g.bench_function("reorg_detection", |b| {
+        b.iter(|| fcb::bench_reorg_detection())
+    });
+    
+    // Test late attestation handling
+    g.bench_function("late_attestation_handling", |b| {
+        b.iter(|| fcb::bench_late_attestation_handling())
+    });
+}
+
+// Safe head calculation performance (like Prysm)
+fn bench_safe_head_performance(c: &mut Criterion) {
+    let mut g = c.benchmark_group("fcr/safe_head_performance");
+    
+    // Test safe head calculation
+    g.bench_function("safe_head_calculation", |b| {
+        b.iter(|| fcb::bench_safe_head_calculation())
+    });
+    
+    // Test safe head reorg detection
+    g.bench_function("safe_head_reorg", |b| {
+        b.iter(|| fcb::bench_safe_head_reorg())
+    });
+    
+    // Test safe head advancement
+    g.bench_function("safe_head_advancement", |b| {
+        b.iter(|| fcb::bench_safe_head_advancement())
+    });
+}
+
+// Cross-epoch performance benchmarks
+fn bench_cross_epoch_performance(c: &mut Criterion) {
+    let mut g = c.benchmark_group("fcr/cross_epoch_performance");
+    
+    // Test cross-epoch confirmation advancement
+    g.bench_function("cross_epoch_confirmation", |b| {
+        b.iter(|| fcb::bench_cross_epoch_confirmation())
+    });
+    
+    // Test epoch boundary weight calculations
+    g.bench_function("epoch_boundary_weights", |b| {
+        b.iter(|| fcb::bench_epoch_boundary_weights())
+    });
+}
+
 criterion_group!(
-    benches_is_one,
+    benches,
+    bench_adjust,
+    bench_cross_epoch_estimate,
+    bench_ffg_weight,
+    bench_full_validator_set_covered,
     bench_is_one_confirmed_math,
-    bench_is_one_confirmed_w_estimate
+    bench_is_one_confirmed_w_estimate,
+    bench_fork_choice_overhead,
+    bench_validator_scaling,
+    bench_memory_usage,
+    bench_production_scenarios,
+    bench_safe_head_performance,
+    bench_cross_epoch_performance
 );
 
-
+criterion_main!(benches);
