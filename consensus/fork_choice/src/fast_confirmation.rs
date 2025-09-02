@@ -9,11 +9,19 @@
 //!
 use crate::Error::ProtoArrayStringError;
 use crate::ForkChoiceStore;
+use crate::metrics::{
+    set_gauge, inc_counter, observe, 
+    FCR_SAFE_HEAD_REORG_COUNT, FCR_SAFE_HEAD_REORG_DISTANCE, 
+    FCR_SAFE_HEAD_REORG_DEPTH, FCR_CONFIRMATION_TIME_SECONDS, FCR_VALIDATOR_SUPPORT_PERCENTAGE,
+    FCR_BYZANTINE_THRESHOLD_PERCENTAGE, FCR_COMMITTEE_WEIGHT_CALCULATION_TIME, 
+    FCR_METADATA_CACHE_SIZE, FCR_EPOCH_BOUNDARY_TRANSITIONS
+};
 
 use proto_array::ProtoArrayForkChoice;
 use std::collections::HashMap;
-use std::error::Error;
+
 use std::marker::PhantomData;
+use std::time::Instant;
 
 use std::sync::Arc;
 use tracing::{debug, info, warn};
@@ -55,7 +63,7 @@ const COMMITTEE_WEIGHT_ESTIMATION_ADJUSTMENT_FACTOR: u64 = 5;
 /// states needed for complete FFG analysis.
 pub trait StateProvider<E: EthSpec> {
     /// Error type for state access operations
-    type Error: Error + Send + Sync + 'static;
+    type Error: std::error::Error + Send + Sync + 'static;
 
     /// Gets the checkpoint state for a given checkpoint.
     ///
@@ -243,6 +251,10 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             slashing = config.slashing_percentage,
             "Fast Confirmation Rule enabled"
         );
+        
+        // Set the Byzantine threshold metric
+        set_gauge(&FCR_BYZANTINE_THRESHOLD_PERCENTAGE, config.beta_percentage as i64);
+        
         Self {
             config,
             meta: HashMap::new(),
@@ -419,12 +431,19 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     where
         T: ForkChoiceStore<E>,
     {
+        let current_slot = fc_store.get_current_slot();
+        
+        // Check for epoch boundary transition
+        if current_slot % E::slots_per_epoch() == 0 {
+            inc_counter(&FCR_EPOCH_BOUNDARY_TRANSITIONS);
+        }
+        
         let head_slot = proto_array
             .get_block(&head_root)
             .map(|b| b.slot.as_u64())
             .unwrap_or_default();
         info!(
-            slot = fc_store.get_current_slot().as_u64(),
+            slot = current_slot.as_u64(),
             head = %head_root,
             head_slot = head_slot,
             prev_confirmed = %self.fcr_store.confirmed_root,
@@ -715,6 +734,17 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             }
         }
 
+        // Check for safe head reorgs by comparing with previous head
+        if head_root != self.fcr_store.prev_slot_head && !self.fcr_store.prev_slot_head.is_zero() {
+            // Calculate reorg distance
+            let reorg_distance = depth;
+            if reorg_distance > 0 {
+                inc_counter(&FCR_SAFE_HEAD_REORG_COUNT);
+                observe(&FCR_SAFE_HEAD_REORG_DISTANCE, reorg_distance as f64);
+                observe(&FCR_SAFE_HEAD_REORG_DEPTH, reorg_distance as f64);
+            }
+        }
+
         Ok(())
     }
 
@@ -749,6 +779,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     where
         T: ForkChoiceStore<E>,
     {
+        let start_time = Instant::now();
         // Get the block to check
         let Some(block) = proto_array.get_block(&block_root) else {
             return Err(ProtoArrayStringError(format!(
@@ -944,6 +975,16 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 beta = beta_threshold,
                 "FCR: block meets LMD confirmation threshold"
             );
+        }
+
+        // Record metrics
+        let elapsed = start_time.elapsed();
+        observe(&FCR_CONFIRMATION_TIME_SECONDS, elapsed.as_secs_f64());
+        
+        // Record validator support percentage if confirmed
+        if lmd_confirmed && committee_weight > 0 {
+            let support_percentage = (support as f64 / committee_weight as f64) * 100.0;
+            observe(&FCR_VALIDATOR_SUPPORT_PERCENTAGE, support_percentage);
         }
 
         // Per spec, do not apply FFG gating here. Return LMD result only.
@@ -1945,6 +1986,10 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
 
 
         let after = self.meta.len();
+        
+        // Update metadata cache size metric
+        set_gauge(&FCR_METADATA_CACHE_SIZE, after as i64);
+        
         info!(
             finalized = %finalized_root,
             pruned = (before as i64 - after as i64),
@@ -1979,6 +2024,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     where
         T: ForkChoiceStore<E>,
     {
+        let start_time = Instant::now();
         if start_slot > end_slot {
             debug!(
                 start_slot = start_slot.as_u64(),
@@ -2048,6 +2094,8 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 adjusted = adjusted,
                 "FCR W: cross-epoch estimate with safety adjustment"
             );
+            let elapsed = start_time.elapsed();
+            observe(&FCR_COMMITTEE_WEIGHT_CALCULATION_TIME, elapsed.as_secs_f64());
             Ok(adjusted)
         }
     }

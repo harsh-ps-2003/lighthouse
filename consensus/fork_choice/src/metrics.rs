@@ -45,6 +45,90 @@ pub static FORK_CHOICE_ON_ATTESTER_SLASHING_TIMES: LazyLock<Result<Histogram>> =
         )
     });
 
+pub static FCR_SAFE_HEAD_SLOT_NUMBER: LazyLock<Result<IntGauge>> = LazyLock::new(|| {
+    try_create_int_gauge(
+        "fcr_safe_head_slot_number",
+        "Current slot number of the fast confirmed safe head",
+    )
+});
+
+pub static FCR_SAFE_HEAD_REORG_COUNT: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
+    try_create_int_counter(
+        "fcr_safe_head_reorg_count_total",
+        "Total number of safe head reorgs detected",
+    )
+});
+
+pub static FCR_SAFE_HEAD_REORG_DISTANCE: LazyLock<Result<Histogram>> = LazyLock::new(|| {
+    try_create_histogram(
+        "fcr_safe_head_reorg_distance",
+        "Distance of safe head reorgs in blocks (1, 2, 4, 8, 16, 32, 64)",
+    )
+});
+
+pub static FCR_SAFE_HEAD_REORG_DEPTH: LazyLock<Result<Histogram>> = LazyLock::new(|| {
+    try_create_histogram(
+        "fcr_safe_head_reorg_depth",
+        "Depth of safe head reorgs in blocks (1, 2, 4, 8, 16, 32)",
+    )
+});
+
+pub static FCR_CONFIRMATION_TIME_SECONDS: LazyLock<Result<Histogram>> = LazyLock::new(|| {
+    try_create_histogram(
+        "fcr_confirmation_time_seconds",
+        "Time taken for block confirmation in seconds",
+    )
+});
+
+pub static FCR_VALIDATOR_SUPPORT_PERCENTAGE: LazyLock<Result<Histogram>> = LazyLock::new(|| {
+    try_create_histogram(
+        "fcr_validator_support_percentage",
+        "Percentage of validator support for confirmed blocks",
+    )
+});
+
+pub static FCR_BYZANTINE_THRESHOLD_PERCENTAGE: LazyLock<Result<IntGauge>> = LazyLock::new(|| {
+    try_create_int_gauge(
+        "fcr_byzantine_threshold_percentage",
+        "Current Byzantine threshold percentage used by FCR",
+    )
+});
+
+pub static FCR_COMMITTEE_WEIGHT_CALCULATION_TIME: LazyLock<Result<Histogram>> = LazyLock::new(|| {
+    try_create_histogram(
+        "fcr_committee_weight_calculation_seconds",
+        "Time taken for committee weight calculations",
+    )
+});
+
+pub static FCR_FFG_SUPPORT_CALCULATION_TIME: LazyLock<Result<Histogram>> = LazyLock::new(|| {
+    try_create_histogram(
+        "fcr_ffg_support_calculation_seconds",
+        "Time taken for FFG support calculations",
+    )
+});
+
+pub static FCR_METADATA_CACHE_SIZE: LazyLock<Result<IntGauge>> = LazyLock::new(|| {
+    try_create_int_gauge(
+        "fcr_metadata_cache_size",
+        "Current size of FCR metadata cache",
+    )
+});
+
+pub static FCR_EPOCH_BOUNDARY_TRANSITIONS: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
+    try_create_int_counter(
+        "fcr_epoch_boundary_transitions_total",
+        "Total number of epoch boundary transitions processed",
+    )
+});
+
+pub static FCR_LATE_ATTESTATION_COUNT: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
+    try_create_int_counter(
+        "fcr_late_attestation_count_total",
+        "Total number of late attestations detected",
+    )
+});
+
 /// Update the global metrics `DEFAULT_REGISTRY` with info from the fork choice.
 pub fn scrape_for_metrics<T: ForkChoiceStore<E>, E: EthSpec, S: StateProvider<E>>(
     fork_choice: &ForkChoice<T, E, S>,
@@ -61,4 +145,13 @@ pub fn scrape_for_metrics<T: ForkChoiceStore<E>, E: EthSpec, S: StateProvider<E>
         &FORK_CHOICE_INDICES,
         fork_choice.proto_array().core_proto_array().indices.len() as i64,
     );
+
+    // Update FCR-specific metrics if FCR is enabled
+    if fork_choice.is_fast_confirmation_enabled() {
+        if let Some(safe_head) = fork_choice.get_fast_confirmed_head() {
+            if let Some(block) = fork_choice.get_block(&safe_head) {
+                set_gauge(&FCR_SAFE_HEAD_SLOT_NUMBER, block.slot.as_u64() as i64);
+            }
+        }
+    }
 }
