@@ -488,7 +488,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     /// * `Some(Hash256)` - The latest confirmed block root
     /// * `None` - No confirmed block found (fallback to finalized checkpoint)
     pub fn get_latest_confirmed<T>(
-        &self,
+        &mut self,
         proto_array: &ProtoArrayForkChoice,
         fc_store: &T,
         head_root: Hash256,
@@ -745,7 +745,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     /// * `Ok(false)` - Block does not meet confirmation criteria
     /// * `Err(Error)` - Error occurred during check
     fn is_one_confirmed<T>(
-        &self,
+        &mut self,
         block_root: Hash256,
         proto_array: &ProtoArrayForkChoice,
         fc_store: &T,
@@ -1082,7 +1082,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     /// * `Some(Hash256)` - The latest confirmed descendant
     /// * `None` - No advancement possible
     fn find_latest_confirmed_descendant<T>(
-        &self,
+        &mut self,
         confirmed_root: Hash256,
         proto_array: &ProtoArrayForkChoice,
         fc_store: &T,
@@ -1969,6 +1969,10 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     /// This implements the committee weight calculation with cross-epoch boundary handling
     /// and safety adjustments as specified in the Python implementation.
     ///
+    /// Uses LRU cache to avoid repeated expensive calculations
+    /// for the same slot ranges, which is critical for sub-slot confirmation timing as
+    /// required by the FCR specification. Cache key is (epoch, start_slot, end_slot).
+    ///
     /// # Arguments
     /// * `start_slot` - Starting slot for committee weight calculation
     /// * `end_slot` - Ending slot for committee weight calculation
@@ -1978,7 +1982,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     /// * `Ok(u64)` - Committee weight between the slots
     /// * `Err(Error)` - Error occurred during calculation
     fn get_committee_weight_between_slots<T>(
-        &self,
+        &mut self,
         start_slot: Slot,
         end_slot: Slot,
         fc_store: &T,
@@ -1995,9 +1999,31 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             return Ok(0);
         }
 
-        let total_active_balance = fc_store.justified_balances().total_effective_balance;
         let start_epoch = start_slot.epoch(E::slots_per_epoch());
         let end_epoch = end_slot.epoch(E::slots_per_epoch());
+        
+        // Check cache first
+        let cache_key = (start_epoch, start_slot, end_slot);
+        let cached_weight = self.fcr_store.committee_weight_lru.get(&cache_key).copied();
+        if let Some(weight) = cached_weight {
+            debug!(
+                start_slot = start_slot.as_u64(),
+                end_slot = end_slot.as_u64(),
+                cached_weight = weight,
+                cache_size = self.fcr_store.committee_weight_lru.len(),
+                "FCR W: cache hit"
+            );
+            return Ok(weight);
+        }
+        
+        debug!(
+            start_slot = start_slot.as_u64(),
+            end_slot = end_slot.as_u64(),
+            cache_size = self.fcr_store.committee_weight_lru.len(),
+            "FCR W: cache miss, computing"
+        );
+
+        let total_active_balance = fc_store.justified_balances().total_effective_balance;
 
         // If an entire epoch is covered by the range, return the total active balance
         if self.is_full_validator_set_covered(start_slot, end_slot) {
@@ -2007,6 +2033,8 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 tab = total_active_balance,
                 "FCR W(fallback): full validator set covered → TAB"
             );
+            // Cache the result for future use
+            self.fcr_store.committee_weight_lru.put(cache_key, total_active_balance);
             return Ok(total_active_balance);
         }
 
@@ -2023,6 +2051,8 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 w = w,
                 "FCR W(fallback): same-epoch pro-rata"
             );
+            // Cache the result for future use
+            self.fcr_store.committee_weight_lru.put(cache_key, w);
             Ok(w)
         } else {
             // Cross-epoch boundary: complex calculation with safety adjustment
@@ -2056,6 +2086,8 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 adjusted = adjusted,
                 "FCR W(fallback): cross-epoch estimate with safety adjustment"
             );
+            // Cache the result for future use
+            self.fcr_store.committee_weight_lru.put(cache_key, adjusted);
             Ok(adjusted)
             // 0.5% safety margin
         }
