@@ -21,6 +21,8 @@ proptest = "1"
 beacon_chain = { workspace = true }
 store = { workspace = true }
 tokio = { workspace = true }
+criterion = { workspace = true }
+types = { workspace = true }
 
 [features]
 default = []
