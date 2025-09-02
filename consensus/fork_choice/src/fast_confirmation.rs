@@ -2314,7 +2314,7 @@ pub mod bench_api {
             meta.insert(Hash256::from_low_u64_be(i), FcrMeta::default());
         }
         // Simulate pruning by removing half the entries
-        meta.retain(|k, _| k.as_bytes()[0] % 2 == 0);
+        meta.retain(|k, _| k.bytes()[0] % 2 == 0);
     }
 
     /// Benchmark wrapper: memory usage with validator count
