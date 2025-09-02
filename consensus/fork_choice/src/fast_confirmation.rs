@@ -2232,4 +2232,45 @@ pub mod bench_api {
     pub fn bench_is_full_validator_set_covered(start_slot: Slot, end_slot: Slot) -> bool {
         fcr().is_full_validator_set_covered(start_slot, end_slot)
     }
+
+    /// Benchmark wrapper: pure math for is_one_confirmed inequality decision.
+    /// Returns whether 2*S > W + (W/50)*beta + proposer_score
+    pub fn bench_is_one_confirmed_math(
+        support: u64,
+        committee_weight: u64,
+        proposer_score: u64,
+        beta_percentage: u64,
+    ) -> bool {
+        let left = support.saturating_mul(2);
+        let right = committee_weight
+            .saturating_add(committee_weight / 50 * beta_percentage)
+            .saturating_add(proposer_score);
+        left > right
+    }
+
+    /// Benchmark wrapper: is_one_confirmed using internal W-estimation for a slot range.
+    /// Computes W between [start_slot, end_slot] from TAB and applies the inequality.
+    pub fn bench_is_one_confirmed_w_estimate(
+        support: u64,
+        total_active_balance: u64,
+        start_slot: Slot,
+        end_slot: Slot,
+        proposer_score: u64,
+        beta_percentage: u64,
+    ) -> bool {
+        let fcr = fcr();
+        let w = if start_slot.epoch(E::slots_per_epoch())
+            == end_slot.epoch(E::slots_per_epoch())
+        {
+            let slots_covered = end_slot - start_slot + 1;
+            let weight_per_slot = total_active_balance / E::slots_per_epoch();
+            weight_per_slot * slots_covered.as_u64()
+        } else {
+            let estimate = fcr
+                .calculate_cross_epoch_weight_estimate(start_slot, end_slot, total_active_balance)
+                .expect("ok");
+            fcr.adjust_committee_weight_estimate_to_ensure_safety(estimate)
+        };
+        bench_is_one_confirmed_math(support, w, proposer_score, beta_percentage)
+    }
 }

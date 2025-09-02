@@ -56,4 +56,57 @@ fn bench_full_validator_set_covered(c: &mut Criterion) {
 criterion_group!(benches, bench_adjust, bench_cross_epoch_estimate, bench_ffg_weight, bench_full_validator_set_covered);
 criterion_main!(benches);
 
+fn bench_is_one_confirmed_math(c: &mut Criterion) {
+    let mut g = c.benchmark_group("fcr/is_one_confirmed_math");
+    // (S, W, proposer_score, beta%)
+    let cases: &[(u64, u64, u64, u64)] = &[
+        (10_000_000_000, 15_000_000_000, 0, 25),
+        (18_000_000_000, 20_000_000_000, 100_000, 25),
+        (30_000_000_000, 32_000_000_000, 500_000, 33),
+        (6_000_000_000, 10_000_000_000, 0, 10),
+    ];
+    for &(s, w, pb, beta) in cases {
+        let name = format!("S{}_W{}_pb{}_b{}", s, w, pb, beta);
+        g.bench_function(BenchmarkId::new("ineq", name), |b| {
+            b.iter(|| fcb::bench_is_one_confirmed_math(s, w, pb, beta))
+        });
+    }
+}
+
+fn bench_is_one_confirmed_w_estimate(c: &mut Criterion) {
+    let mut g = c.benchmark_group("fcr/is_one_confirmed_w_estimate");
+    let tab = 32_000_000_000u64;
+    let ranges = vec![
+        (Slot::new(0), Slot::new(3)),
+        (Slot::new(31), Slot::new(32)),
+        (Slot::new(28), Slot::new(40)),
+    ];
+    // Fixed support values spanning below/above threshold in different ranges.
+    let supports = [8_000_000_000u64, 16_000_000_000u64, 24_000_000_000u64];
+    let proposer = 200_000u64;
+    let betas = [10u64, 25u64, 33u64];
+    for (start, end) in &ranges {
+        for &s in &supports {
+            for &beta in &betas {
+                let name = format!(
+                    "{}-{}_S{}_b{}",
+                    start.as_u64(),
+                    end.as_u64(),
+                    s,
+                    beta
+                );
+                g.bench_function(BenchmarkId::new("ineq_w_est", name), |b| {
+                    b.iter(|| fcb::bench_is_one_confirmed_w_estimate(s, tab, *start, *end, proposer, beta))
+                });
+            }
+        }
+    }
+}
+
+criterion_group!(
+    benches_is_one,
+    bench_is_one_confirmed_math,
+    bench_is_one_confirmed_w_estimate
+);
+
 
