@@ -1577,8 +1577,19 @@ where
     // FCR Integration Methods :
 
     /// Returns the fast confirmed head if FCR is enabled, otherwise None.
+    /// 
+    /// This method returns the cached confirmed root without triggering any new calculations.
+    /// For internal use where mutation is allowed, use `get_fast_confirmed_head_mut`.
     pub fn get_fast_confirmed_head(&self) -> Option<Hash256> {
-        self.fast_confirmation.as_ref().and_then(|fcr| {
+        self.fast_confirmation.as_ref().map(|fcr| fcr.confirmed_root())
+    }
+
+    /// Returns the fast confirmed head with potential updates (requires mutable access).
+    /// 
+    /// This method may trigger new confirmation calculations and should only be used
+    /// when the fork choice is already under a write lock.
+    pub fn get_fast_confirmed_head_mut(&mut self) -> Option<Hash256> {
+        self.fast_confirmation.as_mut().and_then(|fcr| {
             fcr.get_latest_confirmed(
                 &self.proto_array,
                 &self.fc_store,
