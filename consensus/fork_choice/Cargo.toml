@@ -15,6 +15,7 @@ state_processing = { workspace = true }
 tracing = { workspace = true }
 types = { workspace = true }
 lru = { workspace = true }
+zerocopy = { workspace = true }
 
 [dev-dependencies]
 proptest = "1"
