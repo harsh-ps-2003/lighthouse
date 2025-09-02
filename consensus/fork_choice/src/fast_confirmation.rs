@@ -2169,3 +2169,67 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         Ok(estimate)
     }
 }
+
+#[cfg(feature = "fcr_bench")]
+pub mod bench_api {
+    use super::*;
+    use std::sync::LazyLock;
+    use types::MainnetEthSpec;
+
+    struct DummyProvider;
+
+    impl<E: EthSpec> StateProvider<E> for DummyProvider {
+        type Error = std::convert::Infallible;
+
+        fn get_checkpoint_state(
+            &self,
+            _checkpoint: &Checkpoint,
+        ) -> Result<Option<Arc<BeaconState<E>>>, Self::Error> {
+            Ok(None)
+        }
+
+        fn get_total_active_balance_at_epoch(&self, _epoch: Epoch) -> Result<u64, Self::Error> {
+            Ok(0)
+        }
+
+        fn chain_spec(&self) -> &ChainSpec {
+            static SPEC: LazyLock<ChainSpec> = LazyLock::new(ChainSpec::minimal);
+            &SPEC
+        }
+    }
+
+    type E = MainnetEthSpec;
+    type S = DummyProvider;
+
+    fn fcr() -> FastConfirmation<E, S> {
+        let cfg = FastConfirmationConfig::new(DEFAULT_FCR_BYZANTINE_THRESHOLD_PERCENTAGE)
+            .expect("valid beta");
+        FastConfirmation::new(cfg, DummyProvider)
+    }
+
+    /// Benchmark wrapper: adjust committee weight estimate.
+    pub fn bench_adjust_committee_weight_estimate(estimate: u64) -> u64 {
+        fcr().adjust_committee_weight_estimate_to_ensure_safety(estimate)
+    }
+
+    /// Benchmark wrapper: cross-epoch weight estimate.
+    pub fn bench_calculate_cross_epoch_weight_estimate(
+        start_slot: Slot,
+        end_slot: Slot,
+        total_active_balance: u64,
+    ) -> u64 {
+        fcr()
+            .calculate_cross_epoch_weight_estimate(start_slot, end_slot, total_active_balance)
+            .expect("ok")
+    }
+
+    /// Benchmark wrapper: ffg weight till slot.
+    pub fn bench_get_ffg_weight_till_slot(slot: Slot, epoch: Epoch, tab: u64) -> u64 {
+        fcr().get_ffg_weight_till_slot(slot, epoch, tab)
+    }
+
+    /// Benchmark wrapper: full-epoch coverage predicate.
+    pub fn bench_is_full_validator_set_covered(start_slot: Slot, end_slot: Slot) -> bool {
+        fcr().is_full_validator_set_covered(start_slot, end_slot)
+    }
+}
