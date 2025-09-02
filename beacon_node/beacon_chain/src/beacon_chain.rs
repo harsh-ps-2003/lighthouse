@@ -6208,10 +6208,23 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 }
             };
 
+        // Choose safe_block_hash: prefer FCR-confirmed block's execution hash when available,
+        // otherwise fall back to justified hash.
+        let safe_block_hash = if self.config.fast_confirmation_enabled {
+            let fc = self.canonical_head.fork_choice_read_lock();
+            fc.get_fast_confirmed_head().and_then(|confirmed_root| {
+                fc.get_block(&confirmed_root)
+                    .and_then(|b| b.execution_status.block_hash())
+            })
+            .unwrap_or(justified_hash)
+        } else {
+            justified_hash
+        };
+
         let forkchoice_updated_response = execution_layer
             .notify_forkchoice_updated(
                 head_hash,
-                justified_hash,
+                safe_block_hash,
                 finalized_hash,
                 current_slot,
                 head_block_root,
