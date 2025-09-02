@@ -14,7 +14,7 @@ use crate::metrics::{
     FCR_SAFE_HEAD_REORG_COUNT, FCR_SAFE_HEAD_REORG_DISTANCE, 
     FCR_SAFE_HEAD_REORG_DEPTH, FCR_CONFIRMATION_TIME_SECONDS, FCR_VALIDATOR_SUPPORT_PERCENTAGE,
     FCR_BYZANTINE_THRESHOLD_PERCENTAGE, FCR_COMMITTEE_WEIGHT_CALCULATION_TIME, 
-    FCR_METADATA_CACHE_SIZE, FCR_EPOCH_BOUNDARY_TRANSITIONS
+    FCR_FFG_SUPPORT_CALCULATION_TIME, FCR_METADATA_CACHE_SIZE, FCR_EPOCH_BOUNDARY_TRANSITIONS
 };
 
 use proto_array::ProtoArrayForkChoice;
@@ -1651,6 +1651,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     where
         T: ForkChoiceStore<E>,
     {
+        let start_time = std::time::Instant::now();
         let mut checkpoint_weight = 0u64;
 
         // Iterate through all validators and check their votes
@@ -1674,6 +1675,9 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 }
             }
         }
+
+        let elapsed = start_time.elapsed();
+        observe(&FCR_FFG_SUPPORT_CALCULATION_TIME, elapsed.as_secs_f64());
 
         Ok(checkpoint_weight)
     }

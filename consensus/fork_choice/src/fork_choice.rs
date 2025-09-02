@@ -273,6 +273,15 @@ fn dequeue_attestations(
         queued_attestations.len() as u64,
     );
 
+    // Track late attestations for FCR metrics
+    let late_attestations = queued_attestations.len();
+    if late_attestations > 0 {
+        metrics::inc_counter_by(
+            &metrics::FCR_LATE_ATTESTATION_COUNT,
+            late_attestations as u64,
+        );
+    }
+
     std::mem::replace(queued_attestations, remaining)
 }
 
