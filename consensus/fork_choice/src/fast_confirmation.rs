@@ -1195,7 +1195,11 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 if let Some(canonical_roots) =
                     self.get_canonical_roots(proto_array, confirmed_root, head_root)
                 {
-                    for &block_root in canonical_roots.iter().skip(1) {
+                    // Limit the number of blocks we process to prevent stack overflow
+                    let max_blocks = 1000;
+                    let blocks_to_process = canonical_roots.iter().skip(1).take(max_blocks);
+                    
+                    for &block_root in blocks_to_process {
                         let block = match proto_array.get_block(&block_root) {
                             Some(b) => b,
                             None => break,
@@ -1255,7 +1259,11 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             if let Some(canonical_roots) =
                 self.get_canonical_roots(proto_array, confirmed_root, head_root)
             {
-                for &block_root in canonical_roots.iter().skip(1) {
+                // Limit the number of blocks we process to prevent stack overflow
+                let max_blocks = 1000;
+                let blocks_to_process = canonical_roots.iter().skip(1).take(max_blocks);
+                
+                for &block_root in blocks_to_process {
                     let block = match proto_array.get_block(&block_root) {
                         Some(b) => b,
                         None => break,
@@ -1414,13 +1422,27 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     ) -> Option<Vec<Hash256>> {
         let mut canonical_roots = Vec::new();
         let mut current_root = descendant_root;
+        let mut depth = 0;
+        const MAX_DEPTH: usize = 10000; // Safety limit for very long chains
 
         // Walk from descendant to ancestor
-        while current_root != ancestor_root {
+        while current_root != ancestor_root && depth < MAX_DEPTH {
             canonical_roots.push(current_root);
 
             let block = proto_array.get_block(&current_root)?;
             current_root = block.parent_root?;
+            depth += 1;
+        }
+
+        // If we hit the depth limit, return None to avoid stack overflow
+        if depth >= MAX_DEPTH {
+            warn!(
+                ancestor = %ancestor_root,
+                descendant = %descendant_root,
+                depth = depth,
+                "FCR: canonical path too long, aborting to prevent stack overflow"
+            );
+            return None;
         }
 
         canonical_roots.push(ancestor_root);
