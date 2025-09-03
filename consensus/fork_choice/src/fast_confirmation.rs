@@ -634,6 +634,26 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     where
         T: ForkChoiceStore<E>,
     {
+        // **SYNC SAFETY**: Completely disable FCR during sync to prevent stack overflow
+        // Based on Prysm's approach: only run FCR when at current slot
+        let current_slot = fc_store.get_current_slot();
+        let head_slot = proto_array
+            .get_block(&head_root)
+            .map(|b| b.slot)
+            .unwrap_or(current_slot);
+        
+        // Prysm's key safety measure: only run FCR when head_slot == current_slot
+        if head_slot != current_slot {
+            debug!(
+                head = %head_root,
+                head_slot = head_slot.as_u64(),
+                current_slot = current_slot.as_u64(),
+                "FCR get_latest_confirmed: completely disabled during sync (head_slot != current_slot) - Prysm safety measure"
+            );
+            // Return finalized checkpoint as safe fallback during sync
+            return Some(fc_store.finalized_checkpoint().root);
+        }
+
         let mut confirmed_root = self.fcr_store.confirmed_root;
         let current_epoch = fc_store.get_current_slot().epoch(E::slots_per_epoch());
         let head_slot = proto_array
