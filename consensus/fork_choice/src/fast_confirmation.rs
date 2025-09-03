@@ -398,14 +398,40 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             return true;
         }
 
-        // **SYNC SAFETY**: No depth limiting needed here - sync safety is handled by early return
-        // in `update_after_find_head` and `on_new_slot` when `head_slot != current_slot`.
-        // This follows Prysm's approach of handling sync safety at the function level, not in `is_ancestor`.
+        // **CRITICAL FIX**: Add depth limiting to prevent infinite recursion during sync
+        // The proto_array.is_descendant method uses iter_block_roots which can loop infinitely
+        // if there are circular references in the DAG during sync. This is a Lighthouse-specific
+        // issue that Prysm doesn't have due to different DAG structures.
+        let mut current_root = root;
+        let mut depth = 0;
+        const MAX_ANCESTOR_DEPTH: usize = 1000; // Safety limit for ancestor checks
 
-        // Use the existing is_descendant method with swapped arguments
-        // is_descendant(ancestor, root) checks if root is a descendant of ancestor
-        // which is equivalent to ancestor being an ancestor of root
-        proto_array.is_descendant(ancestor, root)
+        while depth < MAX_ANCESTOR_DEPTH {
+            if let Some(block) = proto_array.get_block(&current_root) {
+                if let Some(parent_root) = block.parent_root {
+                    if parent_root == ancestor {
+                        return true;
+                    }
+                    current_root = parent_root;
+                    depth += 1;
+                } else {
+                    // Reached genesis, ancestor not found
+                    return false;
+                }
+            } else {
+                // Block not found in proto array
+                return false;
+            }
+        }
+
+        // Hit depth limit - assume not ancestor to prevent stack overflow
+        warn!(
+            root = %root,
+            ancestor = %ancestor,
+            depth = depth,
+            "FCR: is_ancestor depth limit reached, assuming not ancestor to prevent stack overflow"
+        );
+        false
     }
 
     /// Checks if a block is confirmed by FCR.
