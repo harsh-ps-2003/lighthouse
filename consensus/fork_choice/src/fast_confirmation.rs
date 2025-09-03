@@ -542,7 +542,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     {
         let current_slot = fc_store.get_current_slot();
         
-        // **SYNC SAFETY**: Early return during sync to prevent stack overflow
+        // **SYNC SAFETY**: Completely disable FCR during sync to prevent stack overflow
         // Based on Prysm's approach: only run FCR when at current slot
         let head_slot = proto_array
             .get_block(&head_root)
@@ -555,7 +555,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 slot = current_slot.as_u64(),
                 head = %head_root,
                 head_slot = head_slot.as_u64(),
-                "FCR on_new_slot: skipping during sync (head_slot != current_slot) - Prysm safety measure"
+                "FCR on_new_slot: completely disabled during sync (head_slot != current_slot) - Prysm safety measure"
             );
             return Ok(());
         }
@@ -790,7 +790,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     where
         T: ForkChoiceStore<E>,
     {
-        // **SYNC SAFETY**: Early return during sync to prevent stack overflow
+        // **SYNC SAFETY**: Completely disable FCR during sync to prevent stack overflow
         // Based on Prysm's approach: only run FCR when at current slot
         let current_slot = fc_store.get_current_slot();
         let head_slot = proto_array
@@ -805,7 +805,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 head = %head_root,
                 head_slot = head_slot.as_u64(),
                 current_slot = current_slot.as_u64(),
-                "FCR: skipping during sync (head_slot != current_slot) - Prysm safety measure"
+                "FCR: completely disabled during sync (head_slot != current_slot) - Prysm safety measure"
             );
             return Ok(());
         }
