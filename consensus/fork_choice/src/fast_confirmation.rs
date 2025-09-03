@@ -1037,69 +1037,6 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             debug!(block = %block_root, "FCR: block confirmed");
         }
 
-        // Mark all descendants as confirmed
-        self.mark_descendants_confirmed(block_root, proto_array);
-    }
-
-    /// Recursively marks all descendants of a confirmed block as confirmed.
-    ///
-    /// **Why Required**: When a parent block is confirmed, all its descendants inherit
-    /// the confirmation status. This is a key property of FCR that ensures consistency
-    /// across the block DAG.
-    ///
-    /// # Arguments
-    /// * `parent_root` - The parent block root whose descendants should be marked
-    /// * `proto_array` - The proto array containing the block DAG
-    fn mark_descendants_confirmed(
-        &mut self,
-        parent_root: Hash256,
-        proto_array: &ProtoArrayForkChoice,
-    ) {
-        // Get all blocks in the proto array to find descendants
-        let mut to_process = vec![parent_root];
-        let mut processed = std::collections::HashSet::new();
-
-        while let Some(current_root) = to_process.pop() {
-            if processed.contains(&current_root) {
-                continue;
-            }
-            processed.insert(current_root);
-
-            // Find all blocks that have current_root as their parent
-            // We need to iterate through all blocks in the proto array
-            // Since there's no direct iterator, we'll use the indices HashMap
-            let proto_array_ref = proto_array.core_proto_array();
-            for block_root in proto_array_ref.indices.keys() {
-                if let Some(block) = proto_array.get_block(block_root) {
-                    if let Some(parent) = block.parent_root {
-                        if parent == current_root {
-                            // This is a descendant, mark it as confirmed
-                            if let Some(meta) = self.meta.get_mut(block_root) {
-                                meta.confirmed = true;
-                            } else {
-                                // Create new metadata if it doesn't exist
-                                self.meta.insert(
-                                    *block_root,
-                                    FcrMeta {
-                                        support: 0,
-                                        committee_weight: 0,
-                                        confirmed: true,
-                                    },
-                                );
-                            }
-
-                            // Add this descendant to the processing queue
-                            to_process.push(*block_root);
-                        }
-                    }
-                }
-            }
-        }
-        debug!(
-            parent = %parent_root,
-            descendants_confirmed = (processed.len().saturating_sub(1)),
-            "FCR: descendants marked confirmed"
-        );
     }
 
     /// Finds the latest confirmed descendant along the canonical chain.
