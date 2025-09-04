@@ -230,10 +230,7 @@ impl Default for FcrStore {
     }
 }
 
-/// Safe head metrics for monitoring - similar to Prysm implementation.
-///
-/// **Performance**: O(1) metrics collection leveraging cached safe head.
-/// **Monitoring**: Provides metrics similar to Prysm's safe head monitoring.
+/// Safe head metrics for monitoring
 #[derive(Debug, Clone)]
 pub struct SafeHeadMetrics {
     /// Current safe head root
@@ -288,7 +285,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         self.fcr_store.confirmed_root
     }
 
-    /// Returns the current safe head root - O(1) lookup.
+    /// Returns the current safe head root
     ///
     /// **Performance**: O(1) safe head access instead of O(depth) ancestor scan.
     /// **Tree-States**: Leverages Lighthouse's structural sharing for efficient updates.
@@ -320,10 +317,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         &self.config
     }
 
-    /// Gets safe head metrics for monitoring - similar to Prysm implementation.
-    ///
-    /// **Performance**: O(1) metrics collection leveraging cached safe head.
-    /// **Monitoring**: Provides metrics similar to Prysm's safe head monitoring.
+    /// Gets safe head metrics for monitoring
     ///
     /// # Arguments
     /// * `proto_array` - The proto array containing the block DAG
@@ -344,10 +338,6 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     }
 
     /// Updates the safe head root - O(1) update.
-    ///
-    /// **Performance**: O(1) safe head update leveraging tree-states structural sharing.
-    /// **Spec Compliance**: Safe head is derived from confirmed_root following Python spec.
-    /// **Tree-States**: No copying needed, just update the reference.
     ///
     /// # Arguments
     /// * `new_safe_head` - The new safe head root
@@ -378,8 +368,6 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     /// **Implementation**: Uses the existing `is_descendant` method with swapped arguments,
     /// following the same pattern as the fork choice's `is_ancestor` method.
     ///
-    /// **Sync Safety**: Added depth limit to prevent stack overflow during sync.
-    ///
     /// # Arguments
     /// * `proto_array` - The proto array containing the block DAG
     /// * `root` - The descendant block root to check
@@ -398,22 +386,15 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             return true;
         }
 
-        // **CRITICAL FIX**: Add depth limiting to prevent infinite recursion during sync
-        // The proto_array.is_descendant method uses iter_block_roots which can loop infinitely
-        // if there are circular references in the DAG during sync. This is a Lighthouse-specific
-        // issue that Prysm doesn't have due to different DAG structures.
         let mut current_root = root;
-        let mut depth = 0;
-        const MAX_ANCESTOR_DEPTH: usize = 1000; // Safety limit for ancestor checks
 
-        while depth < MAX_ANCESTOR_DEPTH {
+        loop {
             if let Some(block) = proto_array.get_block(&current_root) {
                 if let Some(parent_root) = block.parent_root {
                     if parent_root == ancestor {
                         return true;
                     }
                     current_root = parent_root;
-                    depth += 1;
                 } else {
                     // Reached genesis, ancestor not found
                     return false;
@@ -423,15 +404,6 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 return false;
             }
         }
-
-        // Hit depth limit - assume not ancestor to prevent stack overflow
-        warn!(
-            root = %root,
-            ancestor = %ancestor,
-            depth = depth,
-            "FCR: is_ancestor depth limit reached, assuming not ancestor to prevent stack overflow"
-        );
-        false
     }
 
     /// Checks if a block is confirmed by FCR.
