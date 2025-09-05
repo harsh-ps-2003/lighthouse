@@ -317,6 +317,16 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         &self.config
     }
 
+    /// Returns the Byzantine threshold percentage.
+    pub fn beta_percentage(&self) -> u64 {
+        self.config.beta_percentage
+    }
+
+    /// Returns the number of metadata entries in the cache.
+    pub fn metadata_cache_size(&self) -> usize {
+        self.meta.len()
+    }
+
     /// Gets safe head metrics for monitoring
     ///
     /// # Arguments

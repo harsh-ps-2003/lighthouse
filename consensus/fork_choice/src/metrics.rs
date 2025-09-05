@@ -148,10 +148,27 @@ pub fn scrape_for_metrics<T: ForkChoiceStore<E>, E: EthSpec, S: StateProvider<E>
 
     // Update FCR-specific metrics if FCR is enabled
     if fork_choice.is_fast_confirmation_enabled() {
-        if let Some(safe_head) = fork_choice.get_fast_confirmed_head() {
-            if let Some(block) = fork_choice.get_block(&safe_head) {
-                set_gauge(&FCR_SAFE_HEAD_SLOT_NUMBER, block.slot.as_u64() as i64);
+        if let Some(fcr) = fork_choice.fast_confirmation() {
+            // Update safe head slot number
+            if let Some(safe_head) = fork_choice.get_fast_confirmed_head() {
+                if let Some(block) = fork_choice.get_block(&safe_head) {
+                    set_gauge(&FCR_SAFE_HEAD_SLOT_NUMBER, block.slot.as_u64() as i64);
+                }
+            } else {
+                // Set to 0 if no safe head
+                set_gauge(&FCR_SAFE_HEAD_SLOT_NUMBER, 0);
             }
+            
+            // Update metadata cache size
+            set_gauge(&FCR_METADATA_CACHE_SIZE, fcr.metadata_cache_size() as i64);
+            
+            // Update Byzantine threshold (this should already be set during FCR creation)
+            set_gauge(&FCR_BYZANTINE_THRESHOLD_PERCENTAGE, fcr.beta_percentage() as i64);
         }
+    } else {
+        // FCR is disabled, set metrics to 0
+        set_gauge(&FCR_SAFE_HEAD_SLOT_NUMBER, 0);
+        set_gauge(&FCR_METADATA_CACHE_SIZE, 0);
+        set_gauge(&FCR_BYZANTINE_THRESHOLD_PERCENTAGE, 0);
     }
 }

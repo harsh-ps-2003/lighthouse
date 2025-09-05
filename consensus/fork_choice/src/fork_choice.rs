@@ -1604,6 +1604,11 @@ where
         self.fast_confirmation.is_some()
     }
 
+    /// Returns a reference to the Fast Confirmation Rule if enabled
+    pub fn fast_confirmation(&self) -> Option<&FastConfirmation<E, S>> {
+        self.fast_confirmation.as_ref()
+    }
+
     /// Updates FCR state after finding a new head.
     fn update_fcr_after_find_head(&mut self, head_root: Hash256) -> Result<(), Error<T::Error>> {
         if let Some(fcr) = &mut self.fast_confirmation {
