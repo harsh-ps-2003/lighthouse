@@ -1,0 +1,46 @@
+{
+  "dashboard": {
+    "title": "Lighthouse FCR Research Dashboard",
+    "panels": [
+      {
+        "title": "FCR Safe Head vs Current Head",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "fcr_safe_head_slot_number",
+            "legendFormat": "FCR Safe Head"
+          },
+          {
+            "expr": "fork_choice_head_slot_number", 
+            "legendFormat": "Current Head"
+          }
+        ]
+      },
+      {
+        "title": "FCR Confirmation Time",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, rate(fcr_confirmation_time_seconds_bucket[5m]))",
+            "legendFormat": "95th percentile"
+          }
+        ]
+      },
+      {
+        "title": "FCR Validator Support",
+        "type": "graph", 
+        "targets": [
+          {
+            "expr": "fcr_validator_support_percentage",
+            "legendFormat": "Support %"
+          }
+        ]
+      }
+    ],
+    "refresh": "5s",
+    "time": {
+      "from": "now-1h",
+      "to": "now"
+    }
+  }
+}
