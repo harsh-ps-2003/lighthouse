@@ -515,27 +515,34 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         let current_slot = fc_store.get_current_slot();
         
         // **SYNC SAFETY**: Completely disable FCR during sync to prevent stack overflow
-        let head_slot = proto_array
-            .get_block(&head_root)
-            .map(|b| b.slot)
-            .unwrap_or(current_slot);
+        // COMMENTED OUT FOR TESTING: Enable FCR during sync
+        // let head_slot = proto_array
+        //     .get_block(&head_root)
+        //     .map(|b| b.slot)
+        //     .unwrap_or(current_slot);
         
         // Only run FCR when head_slot == current_slot
-        if head_slot != current_slot {
-            debug!(
-                slot = current_slot.as_u64(),
-                head = %head_root,
-                head_slot = head_slot.as_u64(),
-                "FCR on_new_slot: completely disabled during sync (head_slot != current_slot)"
-            );
-            return Ok(());
-        }
+        // if head_slot != current_slot {
+        //     debug!(
+        //         slot = current_slot.as_u64(),
+        //         head = %head_root,
+        //         head_slot = head_slot.as_u64(),
+        //         "FCR on_new_slot: completely disabled during sync (head_slot != current_slot)"
+        //     );
+        //     return Ok(());
+        // }
         
         // Check for epoch boundary transition
         if current_slot % E::slots_per_epoch() == 0 {
             inc_counter(&FCR_EPOCH_BOUNDARY_TRANSITIONS);
         }
         
+        // Get head_slot for logging purposes
+        let head_slot = proto_array
+            .get_block(&head_root)
+            .map(|b| b.slot)
+            .unwrap_or(current_slot);
+            
         info!(
             slot = current_slot.as_u64(),
             head = %head_root,
@@ -606,24 +613,25 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         T: ForkChoiceStore<E>,
     {
         // **SYNC SAFETY**: Completely disable FCR during sync to prevent stack overflow
+        // COMMENTED OUT FOR TESTING: Enable FCR during sync
         // Only run FCR when at current slot
-        let current_slot = fc_store.get_current_slot();
-        let head_slot = proto_array
-            .get_block(&head_root)
-            .map(|b| b.slot)
-            .unwrap_or(current_slot);
+        // let current_slot = fc_store.get_current_slot();
+        // let head_slot = proto_array
+        //     .get_block(&head_root)
+        //     .map(|b| b.slot)
+        //     .unwrap_or(current_slot);
         
         // Only run FCR when head_slot == current_slot
-        if head_slot != current_slot {
-            debug!(
-                head = %head_root,
-                head_slot = head_slot.as_u64(),
-                current_slot = current_slot.as_u64(),
-                "FCR get_latest_confirmed: completely disabled during sync (head_slot != current_slot)"
-            );
-            // Return finalized checkpoint as safe fallback during sync
-            return Some(fc_store.finalized_checkpoint().root);
-        }
+        // if head_slot != current_slot {
+        //     debug!(
+        //         head = %head_root,
+        //         head_slot = head_slot.as_u64(),
+        //         current_slot = current_slot.as_u64(),
+        //         "FCR get_latest_confirmed: completely disabled during sync (head_slot != current_slot)"
+        //     );
+        //     // Return finalized checkpoint as safe fallback during sync
+        //     return Some(fc_store.finalized_checkpoint().root);
+        // }
 
         let mut confirmed_root = self.fcr_store.confirmed_root;
         let current_epoch = fc_store.get_current_slot().epoch(E::slots_per_epoch());
@@ -782,24 +790,25 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         T: ForkChoiceStore<E>,
     {
         // **SYNC SAFETY**: Completely disable FCR during sync to prevent stack overflow
+        // COMMENTED OUT FOR TESTING: Enable FCR during sync
         // Only run FCR when at current slot
-        let current_slot = fc_store.get_current_slot();
-        let head_slot = proto_array
-            .get_block(&head_root)
-            .map(|b| b.slot)
-            .unwrap_or(current_slot);
+        // let current_slot = fc_store.get_current_slot();
+        // let head_slot = proto_array
+        //     .get_block(&head_root)
+        //     .map(|b| b.slot)
+        //     .unwrap_or(current_slot);
         
         // Only run FCR when head_slot == current_slot
         // This prevents FCR from running during initial sync or when node is behind
-        if head_slot != current_slot {
-            debug!(
-                head = %head_root,
-                head_slot = head_slot.as_u64(),
-                current_slot = current_slot.as_u64(),
-                "FCR: completely disabled during sync (head_slot != current_slot)"
-            );
-            return Ok(());
-        }
+        // if head_slot != current_slot {
+        //     debug!(
+        //         head = %head_root,
+        //         head_slot = head_slot.as_u64(),
+        //         current_slot = current_slot.as_u64(),
+        //         "FCR: completely disabled during sync (head_slot != current_slot)"
+        //     );
+        //     return Ok(());
+        // }
 
         // O(1) optimization: Check if we already have a cached safe head
         // and if the new head is a descendant of the current safe head
