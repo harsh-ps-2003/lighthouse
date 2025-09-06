@@ -162,27 +162,33 @@ impl FastConfirmationConfig {
     }
 }
 
-/// Metadata for a block's FCR status.
-///
-/// **Why Side-Table Approach**: Unlike the Python spec where confirmation status is computed
-/// on-demand, Lighthouse caches this metadata to avoid repeated expensive computations.
-/// This is a performance optimization that trades memory for CPU cycles, which is beneficial
-/// for the high-frequency confirmation checks required by FCR.
-///
-/// This stores per-block FCR metadata that would be computed on-demand in the Python spec.
-///
-#[derive(Debug, Clone, Default)]
-pub struct FcrMeta {
-    /// LMD-GHOST support weight for this block
-    /// **Spec**: Computed in `is_one_confirmed()` as `support`
-    pub support: u64,
-    /// Total committee weight that could have attested
-    /// **Spec**: Computed in `is_one_confirmed()` as `maximum_support`
-    pub committee_weight: u64,
-    /// Whether this block is confirmed by FCR
-    /// **Spec**: Computed on-demand in various functions
-    pub confirmed: bool,
-}
+    /// Metadata for a block's FCR status.
+    ///
+    /// **Why Side-Table Approach**: Unlike the Python spec where confirmation status is computed
+    /// on-demand, Lighthouse caches this metadata to avoid repeated expensive computations.
+    /// This is a performance optimization that trades memory for CPU cycles, which is beneficial
+    /// for the high-frequency confirmation checks required by FCR.
+    ///
+    /// This stores per-block FCR metadata that would be computed on-demand in the Python spec.
+    ///
+    #[derive(Debug, Clone, Default)]
+    pub struct FcrMeta {
+        /// LMD-GHOST support weight for this block
+        /// **Spec**: Computed in `is_one_confirmed()` as `support`
+        pub support: u64,
+        /// Total committee weight that could have attested
+        /// **Spec**: Computed in `is_one_confirmed()` as `maximum_support`
+        pub committee_weight: u64,
+        /// Whether this block is confirmed by FCR
+        /// **Spec**: Computed on-demand in various functions
+        pub confirmed: bool,
+        /// Slot when this block was first seen (for confirmation delay tracking)
+        /// **FCR Spec**: Used to calculate actual confirmation delay
+        pub block_creation_slot: Slot,
+        /// Slot when this block was confirmed (for confirmation delay tracking)
+        /// **FCR Spec**: Used to calculate actual confirmation delay
+        pub confirmation_slot: Option<Slot>,
+    }
 
 /// Store for FCR state across slots and blocks.
 ///
@@ -325,6 +331,29 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     /// Returns the number of metadata entries in the cache.
     pub fn metadata_cache_size(&self) -> usize {
         self.meta.len()
+    }
+
+    /// Tracks when a block is first seen for confirmation delay measurement.
+    ///
+    /// This method should be called when a block is first processed by the fork choice
+    /// to establish the baseline for measuring confirmation delay.
+    ///
+    /// # Arguments
+    /// * `block_root` - The block root to track
+    /// * `block_slot` - The slot when the block was created
+    pub fn track_block_creation(&mut self, block_root: Hash256, block_slot: Slot) {
+        if !self.meta.contains_key(&block_root) {
+            self.meta.insert(
+                block_root,
+                FcrMeta {
+                    support: 0,
+                    committee_weight: 0,
+                    confirmed: false,
+                    block_creation_slot: block_slot,
+                    confirmation_slot: None,
+                },
+            );
+        }
     }
 
     /// Gets safe head metrics for monitoring
@@ -799,6 +828,10 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     where
         T: ForkChoiceStore<E>,
     {
+        // Track block creation for confirmation delay measurement
+        if let Some(block) = proto_array.get_block(&head_root) {
+            self.track_block_creation(head_root, block.slot);
+        }
         // **SYNC SAFETY**: Completely disable FCR during sync to prevent stack overflow
         // COMMENTED OUT FOR TESTING: Enable FCR during sync
         // Only run FCR when at current slot
@@ -867,7 +900,8 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             );
             if lmd_ok {
                 // Mark this block as confirmed
-                self.mark_confirmed(current_root, proto_array);
+                let current_slot = fc_store.get_current_slot();
+                self.mark_confirmed(current_root, proto_array, current_slot);
                 found_confirmed = Some(current_root);
                 break;
             }
@@ -1151,9 +1185,9 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             );
         }
 
-        // Record metrics
+        // Record algorithm execution time (for performance monitoring)
         let elapsed = start_time.elapsed();
-        observe(&FCR_CONFIRMATION_TIME_SECONDS, elapsed.as_secs_f64());
+        observe(&FCR_COMMITTEE_WEIGHT_CALCULATION_TIME, elapsed.as_secs_f64());
         
         // Record validator support percentage if confirmed
         if lmd_confirmed && committee_weight > 0 {
@@ -1181,10 +1215,28 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     /// # Arguments
     /// * `block_root` - The block root to mark as confirmed
     /// * `proto_array` - The proto array containing the block DAG
-    fn mark_confirmed(&mut self, block_root: Hash256, proto_array: &ProtoArrayForkChoice) {
+    /// * `current_slot` - The current slot when confirmation occurs
+    fn mark_confirmed(&mut self, block_root: Hash256, proto_array: &ProtoArrayForkChoice, current_slot: Slot) {
         // Mark the specific block as confirmed
         if let Some(meta) = self.meta.get_mut(&block_root) {
             meta.confirmed = true;
+            meta.confirmation_slot = Some(current_slot);
+            
+            // Calculate and record actual confirmation delay
+            let confirmation_delay_slots = current_slot.as_u64() - meta.block_creation_slot.as_u64();
+            let confirmation_delay_seconds = confirmation_delay_slots as f64 * 12.0; // 12 seconds per slot
+            
+            // Record the actual confirmation delay (not algorithm execution time)
+            observe(&FCR_CONFIRMATION_TIME_SECONDS, confirmation_delay_seconds);
+            
+            info!(
+                block = %block_root,
+                creation_slot = meta.block_creation_slot.as_u64(),
+                confirmation_slot = current_slot.as_u64(),
+                delay_slots = confirmation_delay_slots,
+                delay_seconds = confirmation_delay_seconds,
+                "FCR: block confirmed with actual delay"
+            );
         } else {
             // Create new metadata if it doesn't exist
             self.meta.insert(
@@ -1193,6 +1245,8 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                     support: 0,
                     committee_weight: 0,
                     confirmed: true,
+                    block_creation_slot: current_slot, // Assume created now if not tracked
+                    confirmation_slot: Some(current_slot),
                 },
             );
         }

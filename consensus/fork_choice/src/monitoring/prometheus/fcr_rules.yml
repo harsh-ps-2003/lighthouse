@@ -5,7 +5,7 @@ groups:
   - name: fcr_performance
     interval: 15s
     rules:
-      # Core confirmation time metrics (using actual histogram data)
+      # Core confirmation time metrics (now measuring actual delay)
       - record: fcr_confirmation_time_seconds
         expr: |
           histogram_quantile(0.5, fcr_confirmation_time_seconds_bucket)
@@ -30,7 +30,15 @@ groups:
           algorithm: "fcr"
           quantile: "p99"
 
-      # Compliance tracking (using histogram bucket analysis)
+      # Slot-based confirmation delay (target: 1-2 slots)
+      - record: fcr_slot_confirmation_delay
+        expr: |
+          histogram_quantile(0.5, fcr_confirmation_time_seconds_bucket) / 12
+        labels:
+          target_slots: "1-2"
+          algorithm: "fcr"
+
+      # Compliance tracking (now measuring actual confirmation delay)
       - record: fcr_time_compliance_ratio
         expr: |
           (
@@ -44,8 +52,8 @@ groups:
       - record: fcr_slot_compliance_ratio
         expr: |
           (
-            histogram_quantile(0.5, fcr_confirmation_time_seconds_bucket) >= 12 and 
-            histogram_quantile(0.5, fcr_confirmation_time_seconds_bucket) <= 24
+            histogram_quantile(0.5, fcr_confirmation_time_seconds_bucket) / 12 >= 1 and 
+            histogram_quantile(0.5, fcr_confirmation_time_seconds_bucket) / 12 <= 2
           ) or vector(0)
         labels:
           compliance_type: "slot_window"
