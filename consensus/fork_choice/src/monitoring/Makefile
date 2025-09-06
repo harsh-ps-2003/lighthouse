@@ -1,17 +1,27 @@
 # Simple Makefile for Lighthouse FCR monitoring (research prototype)
 
-.PHONY: help start
+.PHONY: help start stop
 
 help:
 	@echo "Lighthouse FCR Monitoring (Research Prototype)"
 	@echo ""
 	@echo "Commands:"
-	@echo "  start   - Start Prometheus and Grafana"
+	@echo "  start   - Start Prometheus"
+	@echo "  stop    - Stop Prometheus"
 	@echo ""
 	@echo "Access:"
 	@echo "  Prometheus: http://localhost:9090"
-	@echo "  Grafana:    http://localhost:3000 (admin/admin)"
 
 start:
-	@echo "Starting monitoring stack..."
+	@echo "Starting Prometheus..."
 	@./scripts/start.sh
+
+stop:
+	@echo "Stopping Prometheus..."
+	@if [ -f prometheus/prometheus.pid ]; then \
+		kill $$(cat prometheus/prometheus.pid) 2>/dev/null || true; \
+		rm -f prometheus/prometheus.pid; \
+		echo "Prometheus stopped"; \
+	else \
+		echo "Prometheus not running"; \
+	fi

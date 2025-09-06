@@ -1,6 +1,6 @@
 # Lighthouse FCR Monitoring (Research Prototype)
 
-Simple monitoring setup for Fast Confirmation Rule research, inspired by [Prysm's approach](https://ethresear.ch/t/fast-confirmation-rule-on-safe-head-in-prysm/22167).
+Simple Prometheus monitoring setup for Fast Confirmation Rule research, inspired by [Prysm's approach](https://ethresear.ch/t/fast-confirmation-rule-on-safe-head-in-prysm/22167).
 
 ## Quick Start
 
@@ -9,13 +9,19 @@ Simple monitoring setup for Fast Confirmation Rule research, inspired by [Prysm'
    make start
    ```
 
-2. **Access dashboards:**
+2. **Access Prometheus:**
    - Prometheus: http://localhost:9090
-   - Grafana: http://localhost:3000 (admin/admin)
+   - Query FCR metrics: http://localhost:9090/graph
+   - Check targets: http://localhost:9090/targets
+
+3. **Stop monitoring:**
+   ```bash
+   make stop
+   ```
 
 ## Prerequisites
 
-- Prometheus and Grafana installed
+- Prometheus installed
 - Lighthouse running with FCR enabled:
   ```bash
   ./target/release/lighthouse beacon_node \
@@ -28,15 +34,17 @@ Simple monitoring setup for Fast Confirmation Rule research, inspired by [Prysm'
     --metrics --metrics-address 127.0.0.1 --metrics-port 5054
   ```
 
-## What You'll See
+## Key FCR Metrics
 
-- FCR safe head vs current head comparison
-- Confirmation times and validator support
-- Basic performance metrics
+- `fcr_confirmation_time_seconds` - Time from block creation to confirmation (target: 12-24s)
+- `fcr_slot_confirmation_delay` - Slots between block and confirmation (target: 1-2 slots)
+- `fcr_time_compliance_ratio` - Percentage of confirmations within 12-24s window
+- `fcr_slot_compliance_ratio` - Percentage of confirmations within 1-2 slot window
+- `fcr_avg_confirmation_time_5m` - 5-minute rolling average confirmation time
+- `fcr_p95_confirmation_time_5m` - 95th percentile confirmation time
 
 ## Files
 
 - `prometheus/prometheus.yml` - Prometheus config
-- `grafana/grafana.ini` - Grafana config  
-- `grafana/dashboards/fcr-overview.json` - FCR dashboard
-- `scripts/start.sh` - Start monitoring
+- `prometheus/fcr_rules.yml` - FCR-specific recording rules and alerts
+- `scripts/start.sh` - Start monitoring script
