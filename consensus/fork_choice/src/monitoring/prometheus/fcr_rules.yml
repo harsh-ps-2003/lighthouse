@@ -1,0 +1,148 @@
+# FCR-specific Prometheus recording rules
+# This file contains detailed recording rules for Fast Confirmation Rule metrics
+
+groups:
+  - name: fcr_performance
+    interval: 15s
+    rules:
+      # Core confirmation time metrics
+      - record: fcr_confirmation_time_seconds
+        expr: |
+          (
+            fcr_confirmed_block_slot - fcr_confirmed_block_original_slot
+          ) * 12  # Convert slots to seconds (12s per slot)
+        labels:
+          target_window: "12-24s"
+          algorithm: "fcr"
+
+      - record: fcr_slot_confirmation_delay
+        expr: |
+          fcr_confirmed_block_slot - fcr_confirmed_block_original_slot
+        labels:
+          target_slots: "1-2"
+          algorithm: "fcr"
+
+      # Compliance tracking
+      - record: fcr_time_compliance_ratio
+        expr: |
+          (
+            fcr_confirmation_time_seconds >= 12 and 
+            fcr_confirmation_time_seconds <= 24
+          ) or vector(0)
+        labels:
+          compliance_type: "time_window"
+          target: "12-24s"
+
+      - record: fcr_slot_compliance_ratio
+        expr: |
+          (
+            fcr_slot_confirmation_delay >= 1 and 
+            fcr_slot_confirmation_delay <= 2
+          ) or vector(0)
+        labels:
+          compliance_type: "slot_window"
+          target: "1-2_slots"
+
+      # Performance aggregations
+      - record: fcr_avg_confirmation_time_5m
+        expr: |
+          avg_over_time(fcr_confirmation_time_seconds[5m])
+        labels:
+          aggregation: "5m_avg"
+
+      - record: fcr_p95_confirmation_time_5m
+        expr: |
+          quantile_over_time(0.95, fcr_confirmation_time_seconds[5m])
+        labels:
+          aggregation: "5m_p95"
+
+      - record: fcr_p99_confirmation_time_5m
+        expr: |
+          quantile_over_time(0.99, fcr_confirmation_time_seconds[5m])
+        labels:
+          aggregation: "5m_p99"
+
+      # Success rate metrics
+      - record: fcr_confirmation_success_rate
+        expr: |
+          rate(fcr_confirmations_total[1m]) * 12  # Convert to per-slot rate
+        labels:
+          rate_type: "per_slot"
+
+      - record: fcr_confirmation_throughput_per_minute
+        expr: |
+          rate(fcr_confirmations_total[1m]) * 60
+        labels:
+          rate_type: "per_minute"
+
+  - name: fcr_alerts
+    interval: 30s
+    rules:
+      # Performance alerts
+      - alert: FCRSlowConfirmation
+        expr: fcr_avg_confirmation_time_5m > 30
+        for: 2m
+        labels:
+          severity: warning
+          component: fcr
+          alert_type: "performance"
+        annotations:
+          summary: "FCR confirmation time exceeds 30 seconds"
+          description: "Average FCR confirmation time is {{ $value }}s, target is 12-24s"
+          runbook_url: "https://github.com/sigp/lighthouse/wiki/FCR-Troubleshooting"
+
+      - alert: FCRConfirmationTimeout
+        expr: fcr_avg_confirmation_time_5m > 60
+        for: 1m
+        labels:
+          severity: critical
+          component: fcr
+          alert_type: "timeout"
+        annotations:
+          summary: "FCR confirmation timeout - no confirmations in 60+ seconds"
+          description: "FCR has not confirmed blocks for {{ $value }}s"
+          runbook_url: "https://github.com/sigp/lighthouse/wiki/FCR-Troubleshooting"
+
+      - alert: FCRLowComplianceRate
+        expr: fcr_time_compliance_ratio < 0.8
+        for: 5m
+        labels:
+          severity: warning
+          component: fcr
+          alert_type: "compliance"
+        annotations:
+          summary: "FCR compliance rate below 80%"
+          description: "Only {{ $value | humanizePercentage }} of confirmations within 12-24s target"
+
+      - alert: FCRSlotDelayHigh
+        expr: fcr_slot_confirmation_delay > 3
+        for: 2m
+        labels:
+          severity: warning
+          component: fcr
+          alert_type: "slot_delay"
+        annotations:
+          summary: "FCR slot delay exceeds 3 slots"
+          description: "Confirmation taking {{ $value }} slots, target is 1-2 slots"
+
+      - alert: FCRHighLatency
+        expr: fcr_p95_confirmation_time_5m > 45
+        for: 3m
+        labels:
+          severity: warning
+          component: fcr
+          alert_type: "latency"
+        annotations:
+          summary: "FCR 95th percentile confirmation time too high"
+          description: "95th percentile confirmation time is {{ $value }}s, target is <45s"
+
+      - alert: FCRNoConfirmations
+        expr: fcr_confirmation_success_rate == 0
+        for: 1m
+        labels:
+          severity: critical
+          component: fcr
+          alert_type: "no_confirmations"
+        annotations:
+          summary: "FCR not producing any confirmations"
+          description: "FCR confirmation rate is 0 for {{ $value }} minutes"
