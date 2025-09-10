@@ -74,9 +74,16 @@ pub static FCR_SAFE_HEAD_REORG_DEPTH: LazyLock<Result<Histogram>> = LazyLock::ne
 });
 
 pub static FCR_CONFIRMATION_TIME_SECONDS: LazyLock<Result<Histogram>> = LazyLock::new(|| {
-    try_create_histogram(
+    // Buckets tailored for FCR confirmation delay (seconds), covering 0–120s.
+    let buckets = vec![
+        0.1, 0.25, 0.5, 1.0, 2.0, 4.0, 6.0, 8.0,
+        10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 22.0, 24.0,
+        30.0, 45.0, 60.0, 90.0, 120.0,
+    ];
+    try_create_histogram_with_buckets(
         "fcr_confirmation_time_seconds",
         "Time taken for block confirmation in seconds",
+        Ok(buckets),
     )
 });
 
