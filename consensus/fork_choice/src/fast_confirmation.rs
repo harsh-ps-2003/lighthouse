@@ -855,16 +855,19 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
 
         // O(1) optimization: Check if we already have a cached safe head
         // and if the new head is a descendant of the current safe head
-        if !self.fcr_store.safe_head_root.is_zero() 
-            && self.is_ancestor(proto_array, head_root, self.fcr_store.safe_head_root) {
-            // Safe head is still valid - O(1) lookup, no scanning needed
-            debug!(
-                head = %head_root,
-                safe_head = %self.fcr_store.safe_head_root,
-                "FCR: safe head still valid (O(1))"
-            );
-            return Ok(());
-        }
+        // COMMENTED OUT FOR TESTING: This optimization prevents FCR from running
+        // confirmation checks on new blocks. We need to ensure FCR actually checks
+        // for new confirmations even when the new head is a descendant of the current safe head.
+        // if !self.fcr_store.safe_head_root.is_zero() 
+        //     && self.is_ancestor(proto_array, head_root, self.fcr_store.safe_head_root) {
+        //     // Safe head is still valid - O(1) lookup, no scanning needed
+        //     debug!(
+        //         head = %head_root,
+        //         safe_head = %self.fcr_store.safe_head_root,
+        //         "FCR: safe head still valid (O(1))"
+        //     );
+        //     return Ok(());
+        // }
 
         // O(depth) scan only when necessary: no cached safe head or head changed
         let mut current_root = head_root;
