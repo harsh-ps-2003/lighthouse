@@ -116,6 +116,35 @@ groups:
         labels:
           metric_type: "counter"
 
+      # Outcome distributions by slot-delay
+      - record: fcr_confirmations_zero_slot
+        expr: |
+          sum(fcr_confirmations_by_slots_total{slots="0"})
+
+      - record: fcr_confirmations_one_slot
+        expr: |
+          sum(fcr_confirmations_by_slots_total{slots="1"})
+
+      - record: fcr_confirmations_two_slot
+        expr: |
+          sum(fcr_confirmations_by_slots_total{slots="2"})
+
+      - record: fcr_confirmations_ge3_slot
+        expr: |
+          sum(fcr_confirmations_by_slots_total{slots="ge3"})
+
+      - record: fcr_confirmations_ge1_share
+        expr: |
+          (sum(fcr_confirmations_by_slots_total{slots!="0"}))
+          /
+          clamp_min(sum(fcr_confirmations_total), 1)
+
+      - record: fcr_confirmations_1_2_share
+        expr: |
+          (sum(fcr_confirmations_by_slots_total{slots=~"1|2"}))
+          /
+          clamp_min(sum(fcr_confirmations_total), 1)
+
   - name: fcr_alerts
     interval: 30s
     rules:

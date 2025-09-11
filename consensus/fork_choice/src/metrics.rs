@@ -129,6 +129,22 @@ pub static FCR_EPOCH_BOUNDARY_TRANSITIONS: LazyLock<Result<IntCounter>> = LazyLo
     )
 });
 
+// Confirmation outcome metrics
+pub static FCR_CONFIRMATIONS_TOTAL: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
+    try_create_int_counter(
+        "fcr_confirmations_total",
+        "Total number of FCR confirmations (all delays)",
+    )
+});
+
+pub static FCR_CONFIRMATIONS_BY_SLOTS: LazyLock<Result<IntCounterVec>> = LazyLock::new(|| {
+    try_create_int_counter_vec(
+        "fcr_confirmations_by_slots_total",
+        "FCR confirmations bucketed by delay slots (labels: slots=0,1,2,ge3)",
+        &["slots"],
+    )
+});
+
 pub static FCR_LATE_ATTESTATION_COUNT: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
     try_create_int_counter(
         "fcr_late_attestation_count_total",

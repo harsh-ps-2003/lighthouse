@@ -1244,8 +1244,21 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             let confirmation_delay_slots = current_slot.as_u64() - meta.block_creation_slot.as_u64();
             let confirmation_delay_seconds = confirmation_delay_slots as f64 * 12.0; // 12 seconds per slot
             
-            // Record the actual confirmation delay (not algorithm execution time)
-            observe(&FCR_CONFIRMATION_TIME_SECONDS, confirmation_delay_seconds);
+            // Only record non-zero-slot confirmations into the primary histogram,
+            // to ensure graphs represent real 1–2 slot confirmations. Still count
+            // all outcomes in dedicated counters below.
+            if confirmation_delay_slots > 0 {
+                observe(&FCR_CONFIRMATION_TIME_SECONDS, confirmation_delay_seconds);
+            }
+
+            // Increment outcome counters (0/1/2/≥3 slots)
+            inc_counter(&crate::metrics::FCR_CONFIRMATIONS_TOTAL);
+            match confirmation_delay_slots {
+                0 => crate::metrics::inc_counter_vec(&crate::metrics::FCR_CONFIRMATIONS_BY_SLOTS, &["0"]),
+                1 => crate::metrics::inc_counter_vec(&crate::metrics::FCR_CONFIRMATIONS_BY_SLOTS, &["1"]),
+                2 => crate::metrics::inc_counter_vec(&crate::metrics::FCR_CONFIRMATIONS_BY_SLOTS, &["2"]),
+                _ => crate::metrics::inc_counter_vec(&crate::metrics::FCR_CONFIRMATIONS_BY_SLOTS, &["ge3"]),
+            }
             
             info!(
                 block = %block_root,
@@ -1267,6 +1280,9 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                     confirmation_slot: Some(current_slot),
                 },
             );
+            // New metadata path: this is a zero-slot confirmation by construction; only count buckets
+            inc_counter(&crate::metrics::FCR_CONFIRMATIONS_TOTAL);
+            crate::metrics::inc_counter_vec(&crate::metrics::FCR_CONFIRMATIONS_BY_SLOTS, &["0"]);
         }
 
         // Log the confirmation with slot/epoch info if available.
