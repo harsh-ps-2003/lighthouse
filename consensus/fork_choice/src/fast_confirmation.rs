@@ -498,7 +498,22 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             self.fcr_store.confirmed_root = new_confirmed_root;
             // Update safe head cache when confirmed root changes
             self.update_safe_head(new_confirmed_root);
+
             if new_confirmed_root != prev_confirmed {
+                // Seed metadata with the true block creation slot so the
+                // confirmation delay histogram reflects real wall-clock delay.
+                if let Some(b) = proto_array.get_block(&new_confirmed_root) {
+                    self.track_block_creation(new_confirmed_root, b.slot);
+                }
+                // Emit a single observation when we advance confirmed_root.
+                // This guarantees Prometheus sees samples even when the
+                // post-find_head fast-path isn't taken (e.g. during sync).
+                self.mark_confirmed(
+                    new_confirmed_root,
+                    proto_array,
+                    fc_store.get_current_slot(),
+                );
+
                 info!(
                     old = %prev_confirmed,
                     new = %new_confirmed_root,
