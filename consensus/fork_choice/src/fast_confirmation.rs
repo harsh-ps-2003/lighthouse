@@ -1078,25 +1078,29 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         let start_slot = parent_block.slot + 1;
         let end_slot = fc_store.get_current_slot() - 1;
 
+        // Do not confirm within the same slot.
+        // If there is no attestation window yet (start_slot > end_slot),
+        // defer confirmation to the next slot when votes for this block can exist.
+        if start_slot > end_slot {
+            debug!(
+                start_slot = start_slot.as_u64(),
+                end_slot = end_slot.as_u64(),
+                "FCR Q-indicator: empty window this slot → defer"
+            );
+            return Ok(false);
+        }
+
         let committee_weight = if let Some(weighting_state) = weighting_checkpoint_state_opt {
-            // Use TAB derived from the weighting checkpoint state, mirroring the Python spec
             let total_active_balance = weighting_state
                 .get_total_active_balance()
                 .unwrap_or(fc_store.justified_balances().total_effective_balance);
 
-            if start_slot > end_slot {
+            if self.is_full_validator_set_covered(start_slot, end_slot) {
                 debug!(
                     start_slot = start_slot.as_u64(),
                     end_slot = end_slot.as_u64(),
-                    "FCR W: empty range (start > end)"
-                );
-                0
-            } else if self.is_full_validator_set_covered(start_slot, end_slot) {
-                debug!(
-                    start_slot = start_slot.as_u64(),
-                    end_slot = end_slot.as_u64(),
-                    tab = total_active_balance,
-                    "FCR W: full validator set covered → TAB"
+                    total_active_balance = total_active_balance,
+                    "FCR W: full validator set covered → total_active_balance"
                 );
                 total_active_balance
             } else {
@@ -1956,7 +1960,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             }
         };
 
-        // Use TAB from the checkpoint state to avoid extra provider lookups
+        // Use total active balance from the checkpoint state to avoid extra provider lookups
         let total_active_balance = checkpoint_state.get_total_active_balance().map_err(|_| {
             crate::Error::ProtoArrayStringError(
                 "Failed to get total active balance from checkpoint state".to_string(),
@@ -2071,7 +2075,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             }
         };
 
-        // Use TAB from the checkpoint state to avoid extra provider lookups.
+        // Use total active balance from the checkpoint state to avoid extra provider lookups.
         let total_active_balance = checkpoint_state.get_total_active_balance().map_err(|_| {
             crate::Error::ProtoArrayStringError(
                 "Failed to get total active balance from checkpoint state".to_string(),
@@ -2240,8 +2244,8 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             debug!(
                 start_slot = start_slot.as_u64(),
                 end_slot = end_slot.as_u64(),
-                tab = total_active_balance,
-                "FCR W: full validator set covered → TAB"
+                total_active_balance = total_active_balance,
+                "FCR W: full validator set covered → total_active_balance"
             );
             return Ok(total_active_balance);
         }
@@ -2462,8 +2466,8 @@ pub mod bench_api {
     }
 
     /// Benchmark wrapper: ffg weight till slot.
-    pub fn bench_get_ffg_weight_till_slot(slot: Slot, epoch: Epoch, tab: u64) -> u64 {
-        fcr().get_ffg_weight_till_slot(slot, epoch, tab)
+    pub fn bench_get_ffg_weight_till_slot(slot: Slot, epoch: Epoch, total_active_balance: u64) -> u64 {
+        fcr().get_ffg_weight_till_slot(slot, epoch, total_active_balance)
     }
 
     /// Benchmark wrapper: full-epoch coverage predicate.
@@ -2487,7 +2491,7 @@ pub mod bench_api {
     }
 
     /// Benchmark wrapper: is_one_confirmed using internal W-estimation for a slot range.
-    /// Computes W between [start_slot, end_slot] from TAB and applies the inequality.
+    /// Computes W between [start_slot, end_slot] from total active balance and applies the inequality.
     pub fn bench_is_one_confirmed_w_estimate(
         support: u64,
         total_active_balance: u64,
