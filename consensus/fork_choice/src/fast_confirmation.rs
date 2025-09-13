@@ -14,7 +14,9 @@ use crate::metrics::{
     FCR_SAFE_HEAD_REORG_COUNT, FCR_SAFE_HEAD_REORG_DISTANCE, 
     FCR_SAFE_HEAD_REORG_DEPTH, FCR_CONFIRMATION_TIME_SECONDS, FCR_VALIDATOR_SUPPORT_PERCENTAGE,
     FCR_BYZANTINE_THRESHOLD_PERCENTAGE, FCR_COMMITTEE_WEIGHT_CALCULATION_TIME, 
-    FCR_FFG_SUPPORT_CALCULATION_TIME, FCR_METADATA_CACHE_SIZE, FCR_EPOCH_BOUNDARY_TRANSITIONS
+    FCR_FFG_SUPPORT_CALCULATION_TIME, FCR_METADATA_CACHE_SIZE, FCR_EPOCH_BOUNDARY_TRANSITIONS,
+    FCR_CONFIRMED_REORG_COUNT, FCR_CONFIRMED_REORG_SLOTS, FCR_CONFIRMED_ROOT_ROLLBACK_COUNT,
+    FCR_CONFIRMED_ROOT_ROLLBACK_SLOTS,
 };
 
 use proto_array::ProtoArrayForkChoice;
@@ -722,6 +724,25 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                     head = %head_root,
                     "FCR: falling back to finalized checkpoint for safety"
                 );
+                // Confirmed block is off the canonical chain → confirmed reorg event
+                inc_counter(&FCR_CONFIRMED_REORG_COUNT);
+                if let (Some(old_b), Some(new_b)) = (
+                    proto_array.get_block(&confirmed_root),
+                    proto_array.get_block(&finalized),
+                ) {
+                    let old_slot = old_b.slot.as_u64();
+                    let new_slot = new_b.slot.as_u64();
+                    let slot_delta = old_slot.saturating_sub(new_slot) as f64;
+                    observe(&FCR_CONFIRMED_REORG_SLOTS, slot_delta);
+                    warn!(
+                        old_confirmed = %confirmed_root,
+                        old_slot,
+                        new_confirmed = %finalized,
+                        new_slot,
+                        slot_delta,
+                        "FCR: confirmed root reorged off canonical chain"
+                    );
+                }
                 confirmed_root = finalized;
             }
         } else {
@@ -812,6 +833,21 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             head_slot = head_slot,
             "FCR get_latest_confirmed: result"
         );
+
+        // Rollback detection: confirmed root moved to an earlier slot
+        if final_confirmed_slot > 0 && confirmed_slot_initial > 0 && final_confirmed_slot < confirmed_slot_initial {
+            let slot_delta = (confirmed_slot_initial - final_confirmed_slot) as f64;
+            inc_counter(&FCR_CONFIRMED_ROOT_ROLLBACK_COUNT);
+            observe(&FCR_CONFIRMED_ROOT_ROLLBACK_SLOTS, slot_delta);
+            warn!(
+                previous_confirmed_slot = confirmed_slot_initial,
+                new_confirmed_slot = final_confirmed_slot,
+                slot_delta,
+                previous_confirmed = %self.fcr_store.confirmed_root,
+                new_confirmed = %confirmed_root,
+                "FCR: confirmed root rollback detected"
+            );
+        }
 
         Some(confirmed_root)
     }

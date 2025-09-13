@@ -73,6 +73,34 @@ pub static FCR_SAFE_HEAD_REORG_DEPTH: LazyLock<Result<Histogram>> = LazyLock::ne
     )
 });
 
+pub static FCR_CONFIRMED_REORG_COUNT: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
+    try_create_int_counter(
+        "fcr_confirmed_reorg_count_total",
+        "Total number of times a previously confirmed block was reorged out",
+    )
+});
+
+pub static FCR_CONFIRMED_REORG_SLOTS: LazyLock<Result<Histogram>> = LazyLock::new(|| {
+    try_create_histogram(
+        "fcr_confirmed_reorg_slots",
+        "Slot distance between old and new confirmed roots when a reorg occurs",
+    )
+});
+
+pub static FCR_CONFIRMED_ROOT_ROLLBACK_COUNT: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
+    try_create_int_counter(
+        "fcr_confirmed_root_rollback_count_total",
+        "Total number of times the confirmed root moved to an earlier slot",
+    )
+});
+
+pub static FCR_CONFIRMED_ROOT_ROLLBACK_SLOTS: LazyLock<Result<Histogram>> = LazyLock::new(|| {
+    try_create_histogram(
+        "fcr_confirmed_root_rollback_slots",
+        "Slots decreased when the confirmed root rolled back",
+    )
+});
+
 pub static FCR_CONFIRMATION_TIME_SECONDS: LazyLock<Result<Histogram>> = LazyLock::new(|| {
     // Buckets tailored for FCR confirmation delay (seconds), covering 0–120s.
     let buckets = vec![
