@@ -101,6 +101,45 @@ pub static FCR_CONFIRMED_ROOT_ROLLBACK_SLOTS: LazyLock<Result<Histogram>> = Lazy
     )
 });
 
+// Distribution of slot delay between block creation and confirmation (in slots)
+pub static FCR_CONFIRMATION_SLOT_DELAY: LazyLock<Result<Histogram>> = LazyLock::new(|| {
+    // Focused buckets for 0–4 and some headroom
+    let buckets = vec![0.0, 1.0, 2.0, 3.0, 4.0, 8.0];
+    try_create_histogram_with_buckets(
+        "fcr_confirmation_slot_delay",
+        "Slots between block slot and confirmation slot",
+        Ok(buckets),
+    )
+});
+
+// Distribution of head-to-confirmed gap at confirmation time (head_slot - confirmed_block_slot)
+pub static FCR_HEAD_TO_CONFIRMED_GAP_SLOTS: LazyLock<Result<Histogram>> = LazyLock::new(|| {
+    let buckets = vec![0.0, 1.0, 2.0, 3.0, 4.0, 8.0, 16.0, 32.0];
+    try_create_histogram_with_buckets(
+        "fcr_head_to_confirmed_gap_slots",
+        "Gap in slots between current head and confirmed block at confirmation time",
+        Ok(buckets),
+    )
+});
+
+// Restarts of confirmation rule with reason labels (stale|reorg)
+pub static FCR_RESTARTS_TOTAL: LazyLock<Result<IntCounterVec>> = LazyLock::new(|| {
+    try_create_int_counter_vec(
+        "fcr_restarts_total",
+        "Total number of confirmation rule restarts, labeled by reason",
+        &["reason"],
+    )
+});
+
+// Tail-case confirmations labeled by epoch-boundary and delay bucket
+pub static FCR_TAIL_CASES_TOTAL: LazyLock<Result<IntCounterVec>> = LazyLock::new(|| {
+    try_create_int_counter_vec(
+        "fcr_tail_cases_total",
+        "Tail confirmations (delay >=2 slots) labeled by epoch_boundary and delay bucket",
+        &["epoch_boundary", "delay_bucket"],
+    )
+});
+
 pub static FCR_CONFIRMATION_TIME_SECONDS: LazyLock<Result<Histogram>> = LazyLock::new(|| {
     // Buckets tailored for FCR confirmation delay (seconds), covering 0–120s.
     let buckets = vec![

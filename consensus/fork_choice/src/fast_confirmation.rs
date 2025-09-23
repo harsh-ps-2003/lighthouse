@@ -10,13 +10,14 @@
 use crate::Error::ProtoArrayStringError;
 use crate::ForkChoiceStore;
 use crate::metrics::{
-    set_gauge, inc_counter, observe, 
-    FCR_SAFE_HEAD_REORG_COUNT, FCR_SAFE_HEAD_REORG_DISTANCE, 
+    set_gauge, inc_counter, observe,
+    FCR_SAFE_HEAD_REORG_COUNT, FCR_SAFE_HEAD_REORG_DISTANCE,
     FCR_SAFE_HEAD_REORG_DEPTH, FCR_CONFIRMATION_TIME_SECONDS, FCR_VALIDATOR_SUPPORT_PERCENTAGE,
-    FCR_BYZANTINE_THRESHOLD_PERCENTAGE, FCR_COMMITTEE_WEIGHT_CALCULATION_TIME, 
+    FCR_BYZANTINE_THRESHOLD_PERCENTAGE, FCR_COMMITTEE_WEIGHT_CALCULATION_TIME,
     FCR_FFG_SUPPORT_CALCULATION_TIME, FCR_METADATA_CACHE_SIZE, FCR_EPOCH_BOUNDARY_TRANSITIONS,
     FCR_CONFIRMED_REORG_COUNT, FCR_CONFIRMED_REORG_SLOTS, FCR_CONFIRMED_ROOT_ROLLBACK_COUNT,
-    FCR_CONFIRMED_ROOT_ROLLBACK_SLOTS,
+    FCR_CONFIRMED_ROOT_ROLLBACK_SLOTS, FCR_CONFIRMATION_SLOT_DELAY, FCR_HEAD_TO_CONFIRMED_GAP_SLOTS,
+    FCR_RESTARTS_TOTAL, FCR_TAIL_CASES_TOTAL,
 };
 
 use proto_array::ProtoArrayForkChoice;
@@ -510,10 +511,15 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 // Emit a single observation when we advance confirmed_root.
                 // This guarantees Prometheus sees samples even when the
                 // post-find_head fast-path isn't taken (e.g. during sync).
+                let head_slot_for_gap = proto_array
+                    .get_block(&head_root)
+                    .map(|b| b.slot)
+                    .unwrap_or(fc_store.get_current_slot());
                 self.mark_confirmed(
                     new_confirmed_root,
                     proto_array,
                     fc_store.get_current_slot(),
+                    head_slot_for_gap,
                 );
 
                 info!(
@@ -713,9 +719,9 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         if let Some(confirmed_block) = proto_array.get_block(&confirmed_root) {
             let confirmed_block_epoch = confirmed_block.slot.epoch(E::slots_per_epoch());
 
-            if confirmed_block_epoch + 1 < current_epoch
-                || !proto_array.is_descendant(confirmed_root, head_root)
-            {
+            let too_old = confirmed_block_epoch + 1 < current_epoch;
+            let off_canonical = !proto_array.is_descendant(confirmed_root, head_root);
+            if too_old || off_canonical {
                 let finalized = fc_store.finalized_checkpoint().root;
                 warn!(
                     current_epoch = current_epoch.as_u64(),
@@ -724,24 +730,30 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                     head = %head_root,
                     "FCR: falling back to finalized checkpoint for safety"
                 );
-                // Confirmed block is off the canonical chain → confirmed reorg event
-                inc_counter(&FCR_CONFIRMED_REORG_COUNT);
-                if let (Some(old_b), Some(new_b)) = (
-                    proto_array.get_block(&confirmed_root),
-                    proto_array.get_block(&finalized),
-                ) {
-                    let old_slot = old_b.slot.as_u64();
-                    let new_slot = new_b.slot.as_u64();
-                    let slot_delta = old_slot.saturating_sub(new_slot) as f64;
-                    observe(&FCR_CONFIRMED_REORG_SLOTS, slot_delta);
-                    warn!(
-                        old_confirmed = %confirmed_root,
-                        old_slot,
-                        new_confirmed = %finalized,
-                        new_slot,
-                        slot_delta,
-                        "FCR: confirmed root reorged off canonical chain"
-                    );
+                if off_canonical {
+                    // Confirmed block is off the canonical chain → confirmed reorg event
+                    inc_counter(&FCR_CONFIRMED_REORG_COUNT);
+                    crate::metrics::inc_counter_vec(&FCR_RESTARTS_TOTAL, &["reorg"]);
+                    if let (Some(old_b), Some(new_b)) = (
+                        proto_array.get_block(&confirmed_root),
+                        proto_array.get_block(&finalized),
+                    ) {
+                        let old_slot = old_b.slot.as_u64();
+                        let new_slot = new_b.slot.as_u64();
+                        let slot_delta = old_slot.saturating_sub(new_slot) as f64;
+                        observe(&FCR_CONFIRMED_REORG_SLOTS, slot_delta);
+                        warn!(
+                            old_confirmed = %confirmed_root,
+                            old_slot,
+                            new_confirmed = %finalized,
+                            new_slot,
+                            slot_delta,
+                            "FCR: confirmed root reorged off canonical chain"
+                        );
+                    }
+                } else {
+                    // Too old but still on canonical → treat as stale restart
+                    crate::metrics::inc_counter_vec(&FCR_RESTARTS_TOTAL, &["stale"]);
                 }
                 confirmed_root = finalized;
             }
@@ -752,6 +764,8 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 finalized = %finalized,
                 "FCR: confirmed root missing, using finalized"
             );
+            // Missing confirmed root → stale restart
+            crate::metrics::inc_counter_vec(&FCR_RESTARTS_TOTAL, &["stale"]);
             confirmed_root = finalized;
         }
 
@@ -955,7 +969,11 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             if lmd_ok {
                 // Mark this block as confirmed
                 let current_slot = fc_store.get_current_slot();
-                self.mark_confirmed(current_root, proto_array, current_slot);
+                let head_slot_for_gap = proto_array
+                    .get_block(&head_root)
+                    .map(|b| b.slot)
+                    .unwrap_or(current_slot);
+                self.mark_confirmed(current_root, proto_array, current_slot, head_slot_for_gap);
                 found_confirmed = Some(current_root);
                 break;
             }
@@ -1274,7 +1292,8 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     /// * `block_root` - The block root to mark as confirmed
     /// * `proto_array` - The proto array containing the block DAG
     /// * `current_slot` - The current slot when confirmation occurs
-    fn mark_confirmed(&mut self, block_root: Hash256, proto_array: &ProtoArrayForkChoice, current_slot: Slot) {
+    /// * `head_slot` - The current head's slot (for head-to-confirmed gap metric)
+    fn mark_confirmed(&mut self, block_root: Hash256, proto_array: &ProtoArrayForkChoice, current_slot: Slot, head_slot: Slot) {
         // Mark the specific block as confirmed
         if let Some(meta) = self.meta.get_mut(&block_root) {
             meta.confirmed = true;
@@ -1290,6 +1309,13 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             if confirmation_delay_slots > 0 {
                 observe(&FCR_CONFIRMATION_TIME_SECONDS, confirmation_delay_seconds);
             }
+            // Always record the slot-delay distribution
+            observe(&FCR_CONFIRMATION_SLOT_DELAY, confirmation_delay_slots as f64);
+            // Record head-to-confirmed gap
+            if let Some(block) = proto_array.get_block(&block_root) {
+                let head_gap = head_slot.as_u64().saturating_sub(block.slot.as_u64()) as f64;
+                observe(&FCR_HEAD_TO_CONFIRMED_GAP_SLOTS, head_gap);
+            }
 
             // Increment outcome counters (0/1/2/≥3 slots)
             inc_counter(&crate::metrics::FCR_CONFIRMATIONS_TOTAL);
@@ -1300,12 +1326,21 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 _ => crate::metrics::inc_counter_vec(&crate::metrics::FCR_CONFIRMATIONS_BY_SLOTS, &["ge3"]),
             }
             
+            // Tail-case labeling for analysis (delay >= 2)
+            if confirmation_delay_slots >= 2 {
+                let epoch_boundary = if current_slot % E::slots_per_epoch() == 0 { "true" } else { "false" };
+                let delay_bucket = if confirmation_delay_slots == 2 { "2" } else if confirmation_delay_slots == 3 { "3" } else { "ge4" };
+                crate::metrics::inc_counter_vec(&FCR_TAIL_CASES_TOTAL, &[epoch_boundary, delay_bucket]);
+            }
+
             info!(
                 block = %block_root,
                 creation_slot = meta.block_creation_slot.as_u64(),
                 confirmation_slot = current_slot.as_u64(),
                 delay_slots = confirmation_delay_slots,
                 delay_seconds = confirmation_delay_seconds,
+                head_slot = head_slot.as_u64(),
+                epoch_boundary = (current_slot % E::slots_per_epoch() == 0),
                 "FCR: block confirmed with actual delay"
             );
         } else {
@@ -1323,6 +1358,12 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             // New metadata path: this is a zero-slot confirmation by construction; only count buckets
             inc_counter(&crate::metrics::FCR_CONFIRMATIONS_TOTAL);
             crate::metrics::inc_counter_vec(&crate::metrics::FCR_CONFIRMATIONS_BY_SLOTS, &["0"]);
+            // Also record distributions
+            observe(&FCR_CONFIRMATION_SLOT_DELAY, 0.0);
+            if let Some(block) = proto_array.get_block(&block_root) {
+                let head_gap = head_slot.as_u64().saturating_sub(block.slot.as_u64()) as f64;
+                observe(&FCR_HEAD_TO_CONFIRMED_GAP_SLOTS, head_gap);
+            }
         }
 
         // Log the confirmation with slot/epoch info if available.
