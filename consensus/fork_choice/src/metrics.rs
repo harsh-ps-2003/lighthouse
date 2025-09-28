@@ -140,6 +140,14 @@ pub static FCR_TAIL_CASES_TOTAL: LazyLock<Result<IntCounterVec>> = LazyLock::new
     )
 });
 
+// Sync state: 1 when head_slot == current_slot, else 0 
+pub static FCR_IN_SYNC: LazyLock<Result<IntGauge>> = LazyLock::new(|| {
+    try_create_int_gauge(
+        "fcr_in_sync_state",
+        "1 if head_slot == current_slot at measurement time, else 0",
+    )
+});
+
 pub static FCR_CONFIRMATION_TIME_SECONDS: LazyLock<Result<Histogram>> = LazyLock::new(|| {
     // Buckets tailored for FCR confirmation delay (seconds), covering 0–120s.
     let buckets = vec![

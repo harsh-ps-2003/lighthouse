@@ -17,7 +17,7 @@ use crate::metrics::{
     FCR_FFG_SUPPORT_CALCULATION_TIME, FCR_METADATA_CACHE_SIZE, FCR_EPOCH_BOUNDARY_TRANSITIONS,
     FCR_CONFIRMED_REORG_COUNT, FCR_CONFIRMED_REORG_SLOTS, FCR_CONFIRMED_ROOT_ROLLBACK_COUNT,
     FCR_CONFIRMED_ROOT_ROLLBACK_SLOTS, FCR_CONFIRMATION_SLOT_DELAY, FCR_HEAD_TO_CONFIRMED_GAP_SLOTS,
-    FCR_RESTARTS_TOTAL, FCR_TAIL_CASES_TOTAL,
+    FCR_RESTARTS_TOTAL, FCR_TAIL_CASES_TOTAL, FCR_IN_SYNC,
 };
 
 use proto_array::ProtoArrayForkChoice;
@@ -605,6 +605,10 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             .map(|b| b.slot)
             .unwrap_or(current_slot);
             
+        // Update observational sync-state gauge (1 if head_slot == current_slot)
+        let in_sync_val = if head_slot == current_slot { 1 } else { 0 };
+        set_gauge(&FCR_IN_SYNC, in_sync_val);
+
         info!(
             slot = current_slot.as_u64(),
             head = %head_root,
