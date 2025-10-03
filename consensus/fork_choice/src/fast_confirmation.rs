@@ -951,6 +951,9 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                     slot = b.slot.as_u64(),
                     "FCR scan: visiting ancestor"
                 );
+                // Ensure we seed real creation slots for any ancestor we might
+                // confirm, preventing 0-slot delay artifacts in metrics.
+                self.track_block_creation(current_root, b.slot);
             }
             
             // Check if this block is already confirmed
@@ -1349,13 +1352,17 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             );
         } else {
             // Create new metadata if it doesn't exist
+            let creation_slot = proto_array
+                .get_block(&block_root)
+                .map(|b| b.slot)
+                .unwrap_or(current_slot);
             self.meta.insert(
                 block_root,
                 FcrMeta {
                     support: 0,
                     committee_weight: 0,
                     confirmed: true,
-                    block_creation_slot: current_slot, // Assume created now if not tracked
+                    block_creation_slot: creation_slot, // use the block's real slot when available
                     confirmation_slot: Some(current_slot),
                 },
             );
