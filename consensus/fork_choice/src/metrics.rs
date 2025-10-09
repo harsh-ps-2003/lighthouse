@@ -190,6 +190,29 @@ pub static FCR_FFG_SUPPORT_CALCULATION_TIME: LazyLock<Result<Histogram>> = LazyL
     )
 });
 
+// StateProvider performance & availability
+pub static FCR_STATE_PROVIDER_GET_CHECKPOINT_STATE_SECONDS: LazyLock<Result<Histogram>> =
+    LazyLock::new(|| {
+        try_create_histogram(
+            "fcr_state_provider_get_checkpoint_state_seconds",
+            "Latency of StateProvider::get_checkpoint_state calls",
+        )
+    });
+
+pub static FCR_STATE_PROVIDER_MISS_TOTAL: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
+    try_create_int_counter(
+        "fcr_state_provider_checkpoint_state_miss_total",
+        "Total number of times checkpoint state was unavailable (None)",
+    )
+});
+
+pub static FCR_STATE_PROVIDER_ERROR_TOTAL: LazyLock<Result<IntCounter>> = LazyLock::new(|| {
+    try_create_int_counter(
+        "fcr_state_provider_checkpoint_state_error_total",
+        "Total number of errors returned by StateProvider::get_checkpoint_state",
+    )
+});
+
 pub static FCR_METADATA_CACHE_SIZE: LazyLock<Result<IntGauge>> = LazyLock::new(|| {
     try_create_int_gauge(
         "fcr_metadata_cache_size",

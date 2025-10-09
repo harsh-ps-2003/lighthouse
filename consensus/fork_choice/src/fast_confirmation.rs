@@ -18,6 +18,8 @@ use crate::metrics::{
     FCR_CONFIRMED_REORG_COUNT, FCR_CONFIRMED_REORG_SLOTS, FCR_CONFIRMED_ROOT_ROLLBACK_COUNT,
     FCR_CONFIRMED_ROOT_ROLLBACK_SLOTS, FCR_CONFIRMATION_SLOT_DELAY, FCR_HEAD_TO_CONFIRMED_GAP_SLOTS,
     FCR_RESTARTS_TOTAL, FCR_TAIL_CASES_TOTAL, FCR_IN_SYNC,
+    FCR_STATE_PROVIDER_GET_CHECKPOINT_STATE_SECONDS, FCR_STATE_PROVIDER_MISS_TOTAL,
+    FCR_STATE_PROVIDER_ERROR_TOTAL,
 };
 
 use proto_array::ProtoArrayForkChoice;
@@ -1111,11 +1113,25 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
 
         // Try to obtain the checkpoint state via the StateProvider. If unavailable, fall back
         // to pre-existing behavior that uses no checkpoint state and justified_balances.
-        let weighting_checkpoint_state_opt = self
+        // Instrument StateProvider latency/miss/error
+        let sp_start = Instant::now();
+        let weighting_checkpoint_state_opt = match self
             .state_provider
             .get_checkpoint_state(&weighting_checkpoint)
-            .ok()
-            .flatten();
+        {
+            Ok(opt) => {
+                observe(&FCR_STATE_PROVIDER_GET_CHECKPOINT_STATE_SECONDS, sp_start.elapsed().as_secs_f64());
+                if opt.is_none() {
+                    inc_counter(&FCR_STATE_PROVIDER_MISS_TOTAL);
+                }
+                opt
+            }
+            Err(_) => {
+                observe(&FCR_STATE_PROVIDER_GET_CHECKPOINT_STATE_SECONDS, sp_start.elapsed().as_secs_f64());
+                inc_counter(&FCR_STATE_PROVIDER_ERROR_TOTAL);
+                None
+            }
+        };
 
         // Get LMD-GHOST support weight (S) from proto array WITHOUT proposer boost.
         // Pass the weighting checkpoint state to align with the spec signature. The
@@ -1124,7 +1140,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         let Some(support) = proto_array.get_weight::<E>(
             &block_root,
             weighting_checkpoint_state_opt.as_deref(),
-            false, // FCR doesn't want proposer boost included in support
+            false, // support must EXCLUDE proposer boost
             fc_store.proposer_boost_root(),
             fc_store.chain_spec(),
         ) else {
@@ -1151,7 +1167,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             return Ok(false);
         }
 
-        let committee_weight = if let Some(weighting_state) = weighting_checkpoint_state_opt {
+        let committee_weight = if let Some(weighting_state) = weighting_checkpoint_state_opt.as_deref() {
             let total_active_balance = weighting_state
                 .get_total_active_balance()
                 .unwrap_or(fc_store.justified_balances().total_effective_balance);
@@ -1224,10 +1240,21 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             w
         };
 
-        // Get proposer boost score separately (as required by FCR spec)
-        let proposer_score = proto_array
-            .get_proposer_score::<E>(block_root, fc_store.chain_spec())
-            .unwrap_or_default();
+        // We compare against the delta contributed by proposer boost
+        // Compute an upper bound on proposer_delta using the boosted query if available.
+        let boosted_support_opt = proto_array.get_weight::<E>(
+            &block_root,
+            weighting_checkpoint_state_opt.as_deref(),
+            true,  // include proposer boost
+            fc_store.proposer_boost_root(),
+            fc_store.chain_spec(),
+        );
+        let proposer_delta = match boosted_support_opt {
+            Some(boosted) if boosted > support => boosted.saturating_sub(support),
+            _ => proto_array
+                .get_proposer_score::<E>(block_root, fc_store.chain_spec())
+                .unwrap_or_default(),
+        };
 
         // Calculate the Byzantine threshold
         let beta_threshold = self.config.beta_percentage;
@@ -1236,7 +1263,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         // **Python Specification**: 2 * support > maximum_support + maximum_support // 50 * CONFIRMATION_BYZANTINE_THRESHOLD + proposer_score
         // Using integer arithmetic to avoid floating point issues
         let left_side = 2 * support;
-        let right_side = committee_weight + committee_weight / 50 * beta_threshold + proposer_score;
+        let right_side = committee_weight + committee_weight / 50 * beta_threshold + proposer_delta;
 
         // Check LMD-GHOST confirmation (Q-indicator)
         let lmd_confirmed = left_side > right_side;
@@ -1245,7 +1272,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             block = %block_root,
             support = support,
             committee_weight = committee_weight,
-            proposer_score = proposer_score,
+            proposer_score = proposer_delta,
             beta = beta_threshold,
             left = left_side,
             right = right_side,
@@ -1262,7 +1289,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 epoch = epoch_u64,
                 support = support,
                 committee_weight = committee_weight,
-                proposer_score = proposer_score,
+                proposer_score = proposer_delta,
                 beta = beta_threshold,
                 "FCR: block meets LMD confirmation threshold"
             );
@@ -2034,16 +2061,20 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         }
 
         // Get the checkpoint state for analysis
+        let sp_start = std::time::Instant::now();
         let checkpoint_state = match self.state_provider.get_checkpoint_state(checkpoint) {
-            Ok(Some(state)) => state,
+            Ok(Some(state)) => {
+                observe(&FCR_STATE_PROVIDER_GET_CHECKPOINT_STATE_SECONDS, sp_start.elapsed().as_secs_f64());
+                state
+            }
             Ok(None) => {
-                // If checkpoint state is not available, assume it won't be justified
-                // FCR FFG: checkpoint state unavailable; assuming not justified - no logging needed
+                observe(&FCR_STATE_PROVIDER_GET_CHECKPOINT_STATE_SECONDS, sp_start.elapsed().as_secs_f64());
+                inc_counter(&FCR_STATE_PROVIDER_MISS_TOTAL);
                 return Ok(false);
             }
             Err(_) => {
-                // If we can't access the checkpoint state, assume it won't be justified
-                // FCR FFG: checkpoint state error; assuming not justified - no logging needed
+                observe(&FCR_STATE_PROVIDER_GET_CHECKPOINT_STATE_SECONDS, sp_start.elapsed().as_secs_f64());
+                inc_counter(&FCR_STATE_PROVIDER_ERROR_TOTAL);
                 return Ok(false);
             }
         };
@@ -2149,16 +2180,20 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         // instead of >= 2 * total_active_balance
 
         // Get the checkpoint state for analysis
+        let sp_start = std::time::Instant::now();
         let checkpoint_state = match self.state_provider.get_checkpoint_state(&checkpoint) {
-            Ok(Some(state)) => state,
+            Ok(Some(state)) => {
+                observe(&FCR_STATE_PROVIDER_GET_CHECKPOINT_STATE_SECONDS, sp_start.elapsed().as_secs_f64());
+                state
+            }
             Ok(None) => {
-                // If checkpoint state is not available, assume it won't be justified
-                // FCR FFG: checkpoint state unavailable (no-conflict); assuming conflict possible - no logging needed
+                observe(&FCR_STATE_PROVIDER_GET_CHECKPOINT_STATE_SECONDS, sp_start.elapsed().as_secs_f64());
+                inc_counter(&FCR_STATE_PROVIDER_MISS_TOTAL);
                 return Ok(false);
             }
             Err(_) => {
-                // If we can't access the checkpoint state, assume it won't be justified
-                // FCR FFG: checkpoint state error (no-conflict); assuming conflict possible - no logging needed
+                observe(&FCR_STATE_PROVIDER_GET_CHECKPOINT_STATE_SECONDS, sp_start.elapsed().as_secs_f64());
+                inc_counter(&FCR_STATE_PROVIDER_ERROR_TOTAL);
                 return Ok(false);
             }
         };
