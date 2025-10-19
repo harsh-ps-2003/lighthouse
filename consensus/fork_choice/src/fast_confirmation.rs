@@ -553,23 +553,6 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     {
         let current_slot = fc_store.get_current_slot();
         
-        // **SYNC SAFETY**: Completely disable FCR during sync
-        let head_slot = proto_array
-            .get_block(&head_root)
-            .map(|b| b.slot)
-            .unwrap_or(current_slot);
-        
-        // Only run FCR when head_slot == current_slot
-        if head_slot != current_slot {
-            debug!(
-                slot = current_slot.as_u64(),
-                head = %head_root,
-                head_slot = head_slot.as_u64(),
-                "FCR on_new_slot: completely disabled during sync (head_slot != current_slot)"
-            );
-            return Ok(());
-        }
-        
         // Check for epoch boundary transition
         if current_slot % E::slots_per_epoch() == 0 {
             inc_counter(&FCR_EPOCH_BOUNDARY_TRANSITIONS);
@@ -580,10 +563,6 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             .get_block(&head_root)
             .map(|b| b.slot)
             .unwrap_or(current_slot);
-            
-        // Update observational sync-state gauge (1 if head_slot == current_slot)
-        let in_sync_val = if head_slot == current_slot { 1 } else { 0 };
-        set_gauge(&FCR_IN_SYNC, in_sync_val);
 
         info!(
             slot = current_slot.as_u64(),
@@ -636,26 +615,6 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     where
         T: ForkChoiceStore<E>,
     {
-        // **SYNC SAFETY**: Completely disable FCR during sync
-        // Only run FCR when at current slot
-        let current_slot = fc_store.get_current_slot();
-        let head_slot = proto_array
-            .get_block(&head_root)
-            .map(|b| b.slot)
-            .unwrap_or(current_slot);
-        
-        // Only run FCR when head_slot == current_slot
-        if head_slot != current_slot {
-            debug!(
-                head = %head_root,
-                head_slot = head_slot.as_u64(),
-                current_slot = current_slot.as_u64(),
-                "FCR get_latest_confirmed: completely disabled during sync (head_slot != current_slot)"
-            );
-            // Return finalized checkpoint as safe fallback during sync
-            return Some(fc_store.finalized_checkpoint().root);
-        }
-
         let mut current_confirmed_root = self.fcr_store.confirmed_root;
         let current_epoch = fc_store.get_current_slot().epoch(E::slots_per_epoch());
         let head_slot = proto_array
@@ -862,31 +821,9 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         if let Some(block) = proto_array.get_block(&head_root) {
             self.track_block_creation(head_root, block.slot);
         }
-        // **SYNC SAFETY**: Completely disable FCR during sync
-        // Only run FCR when at current slot
-        let current_slot = fc_store.get_current_slot();
-        let head_slot = proto_array
-            .get_block(&head_root)
-            .map(|b| b.slot)
-            .unwrap_or(current_slot);
-        
-        // Only run FCR when head_slot == current_slot
-        // This prevents FCR from running during initial sync or when node is behind
-        if head_slot != current_slot {
-            debug!(
-                head = %head_root,
-                head_slot = head_slot.as_u64(),
-                current_slot = current_slot.as_u64(),
-                "FCR: completely disabled during sync (head_slot != current_slot)"
-            );
-            return Ok(());
-        }
 
         // O(1) optimization: Check if we already have a cached safe head
         // and if the new head is a descendant of the current safe head
-        // This optimization prevents FCR from running
-        // confirmation checks on new blocks. We need to ensure FCR actually checks
-        // for new confirmations even when the new head is a descendant of the current safe head.
         if !self.fcr_store.safe_head_root.is_zero() 
             && self.is_ancestor(proto_array, head_root, self.fcr_store.safe_head_root) {
             // Safe head is still valid - O(1) lookup, no scanning needed
