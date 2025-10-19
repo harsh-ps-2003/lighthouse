@@ -1,4 +1,4 @@
-# Simple Makefile for Lighthouse FCR monitoring (research prototype)
+# Lighthouse FCR monitoring 
 
 .PHONY: help start stop
 

@@ -411,14 +411,6 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     ///
     /// **Implementation**: Uses the existing `is_descendant` method with swapped arguments,
     /// following the same pattern as the fork choice's `is_ancestor` method.
-    ///
-    /// # Arguments
-    /// * `proto_array` - The proto array containing the block DAG
-    /// * `root` - The descendant block root to check
-    /// * `ancestor` - The potential ancestor block root
-    ///
-    /// # Returns
-    /// * `bool` - True if `ancestor` is an ancestor of `root`, false otherwise
     pub fn is_ancestor(
         &self,
         proto_array: &ProtoArrayForkChoice,
@@ -430,24 +422,8 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             return true;
         }
 
-        let mut current_root = root;
-
-        loop {
-            if let Some(block) = proto_array.get_block(&current_root) {
-                if let Some(parent_root) = block.parent_root {
-                    if parent_root == ancestor {
-                        return true;
-                    }
-                    current_root = parent_root;
-                } else {
-                    // Reached genesis, ancestor not found
-                    return false;
-                }
-            } else {
-                // Block not found in proto array
-                return false;
-            }
-        }
+        // Delegate to the canonical implementation in `proto_array`.
+        proto_array.is_descendant(ancestor, root)
     }
 
     /// Checks if a block is confirmed by FCR.
@@ -455,14 +431,31 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     /// **Why Required**: This method provides a simple way to check confirmation status
     /// without exposing internal metadata structures. It's used by tests and other
     /// parts of the codebase to verify FCR behavior.
-    ///
-    /// # Arguments
-    /// * `block_root` - The block root to check
-    ///
-    /// # Returns
-    /// * `bool` - True if the block is confirmed, false otherwise
     pub fn is_block_confirmed(&self, block_root: &Hash256) -> bool {
         self.meta.get(block_root).is_some_and(|meta| meta.confirmed)
+    }
+
+    /// Checks if a block satisfies the LMD-GHOST confirmation rule inequality.
+    ///
+    /// **Specification**: `2 * S > W * (1 + 2 * β / 100) + proposer_score`
+    ///
+    /// This is the core "Q-indicator" from the FCR specification, which determines if a block
+    /// has sufficient LMD-GHOST support (`S`) relative to the total possible committee weight (`W`),
+    /// the proposer's score, and the configured Byzantine tolerance (`β`).
+    fn check_lmd_ghost_confirmation_inequality(
+        &self,
+        support_weight: u64,
+        committee_weight: u64,
+        proposer_score: u64,
+    ) -> bool {
+        let beta_threshold = self.config.beta_percentage;
+        // Using integer arithmetic to avoid floating point issues:
+        // 2 * S > W + (W / 50 * β) + proposer_score
+        let left_side = 2 * support_weight;
+        let right_side =
+            committee_weight + committee_weight / 50 * beta_threshold + proposer_score;
+
+        left_side > right_side
     }
 
     /// Updates FCR state when transitioning to a new slot.
@@ -477,15 +470,6 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     /// 2. Stores the previous slot's justified checkpoint
     /// 3. Stores the previous slot's unrealized justified checkpoint  
     /// 4. Stores the previous slot's head block
-    ///
-    /// # Arguments
-    /// * `proto_array` - The proto array containing the block DAG
-    /// * `fc_store` - The fork choice store containing current state
-    /// * `head_root` - The current head block root
-    ///
-    /// # Returns
-    /// * `Ok(())` - Successfully updated FCR state
-    /// * `Err(Error)` - Error occurred during state update
     pub fn update_per_slot<T>(
         &mut self,
         proto_array: &ProtoArrayForkChoice,
@@ -558,15 +542,6 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     /// This is a convenience method that can be called from the fork choice's `on_tick`
     /// method to update FCR state when transitioning to a new slot. It uses the current
     /// head from the fork choice update parameters.
-    ///
-    /// # Arguments
-    /// * `proto_array` - The proto array containing the block DAG
-    /// * `fc_store` - The fork choice store containing current state
-    /// * `head_root` - The current head block root (from fork choice)
-    ///
-    /// # Returns
-    /// * `Ok(())` - Successfully updated FCR state
-    /// * `Err(Error)` - Error occurred during state update
     pub fn on_new_slot<T>(
         &mut self,
         proto_array: &ProtoArrayForkChoice,
@@ -578,23 +553,22 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     {
         let current_slot = fc_store.get_current_slot();
         
-        // **SYNC SAFETY**: Completely disable FCR during sync to prevent stack overflow
-        // COMMENTED OUT FOR TESTING: Enable FCR during sync
-        // let head_slot = proto_array
-        //     .get_block(&head_root)
-        //     .map(|b| b.slot)
-        //     .unwrap_or(current_slot);
+        // **SYNC SAFETY**: Completely disable FCR during sync
+        let head_slot = proto_array
+            .get_block(&head_root)
+            .map(|b| b.slot)
+            .unwrap_or(current_slot);
         
         // Only run FCR when head_slot == current_slot
-        // if head_slot != current_slot {
-        //     debug!(
-        //         slot = current_slot.as_u64(),
-        //         head = %head_root,
-        //         head_slot = head_slot.as_u64(),
-        //         "FCR on_new_slot: completely disabled during sync (head_slot != current_slot)"
-        //     );
-        //     return Ok(());
-        // }
+        if head_slot != current_slot {
+            debug!(
+                slot = current_slot.as_u64(),
+                head = %head_root,
+                head_slot = head_slot.as_u64(),
+                "FCR on_new_slot: completely disabled during sync (head_slot != current_slot)"
+            );
+            return Ok(());
+        }
         
         // Check for epoch boundary transition
         if current_slot % E::slots_per_epoch() == 0 {
@@ -633,15 +607,6 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     /// This method is designed to be called from the fork choice system using
     /// the cached fork choice update parameters. It's a convenience wrapper
     /// that extracts the head root from the update parameters.
-    ///
-    /// # Arguments
-    /// * `proto_array` - The proto array containing the block DAG
-    /// * `fc_store` - The fork choice store containing current state
-    /// * `forkchoice_params` - The fork choice update parameters containing the head
-    ///
-    /// # Returns
-    /// * `Ok(())` - Successfully updated FCR state
-    /// * `Err(Error)` - Error occurred during state update
     pub fn on_new_slot_with_params<T>(
         &mut self,
         proto_array: &ProtoArrayForkChoice,
@@ -662,15 +627,6 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     /// This implements the core FCR logic to determine the latest confirmed block
     /// along the canonical chain. It follows the Python specification's `get_latest_confirmed`
     /// function with fallback to finalized checkpoint for safety.
-    ///
-    /// # Arguments
-    /// * `proto_array` - The proto array containing the block DAG
-    /// * `fc_store` - The fork choice store containing current state
-    /// * `head_root` - The current head block root
-    ///
-    /// # Returns
-    /// * `Some(Hash256)` - The latest confirmed block root
-    /// * `None` - No confirmed block found (fallback to finalized checkpoint)
     pub fn get_latest_confirmed<T>(
         &self,
         proto_array: &ProtoArrayForkChoice,
@@ -680,41 +636,40 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     where
         T: ForkChoiceStore<E>,
     {
-        // **SYNC SAFETY**: Completely disable FCR during sync to prevent stack overflow
-        // COMMENTED OUT FOR TESTING: Enable FCR during sync
+        // **SYNC SAFETY**: Completely disable FCR during sync
         // Only run FCR when at current slot
-        // let current_slot = fc_store.get_current_slot();
-        // let head_slot = proto_array
-        //     .get_block(&head_root)
-        //     .map(|b| b.slot)
-        //     .unwrap_or(current_slot);
+        let current_slot = fc_store.get_current_slot();
+        let head_slot = proto_array
+            .get_block(&head_root)
+            .map(|b| b.slot)
+            .unwrap_or(current_slot);
         
         // Only run FCR when head_slot == current_slot
-        // if head_slot != current_slot {
-        //     debug!(
-        //         head = %head_root,
-        //         head_slot = head_slot.as_u64(),
-        //         current_slot = current_slot.as_u64(),
-        //         "FCR get_latest_confirmed: completely disabled during sync (head_slot != current_slot)"
-        //     );
-        //     // Return finalized checkpoint as safe fallback during sync
-        //     return Some(fc_store.finalized_checkpoint().root);
-        // }
+        if head_slot != current_slot {
+            debug!(
+                head = %head_root,
+                head_slot = head_slot.as_u64(),
+                current_slot = current_slot.as_u64(),
+                "FCR get_latest_confirmed: completely disabled during sync (head_slot != current_slot)"
+            );
+            // Return finalized checkpoint as safe fallback during sync
+            return Some(fc_store.finalized_checkpoint().root);
+        }
 
-        let mut confirmed_root = self.fcr_store.confirmed_root;
+        let mut current_confirmed_root = self.fcr_store.confirmed_root;
         let current_epoch = fc_store.get_current_slot().epoch(E::slots_per_epoch());
         let head_slot = proto_array
             .get_block(&head_root)
             .map(|b| b.slot.as_u64())
             .unwrap_or_default();
         let confirmed_slot_initial = proto_array
-            .get_block(&confirmed_root)
+            .get_block(&current_confirmed_root)
             .map(|b| b.slot.as_u64())
             .unwrap_or_default();
         debug!(
             head = %head_root,
             head_slot = head_slot,
-            confirmed_initial = %confirmed_root,
+            confirmed_initial = %current_confirmed_root,
             confirmed_initial_slot = confirmed_slot_initial,
             current_epoch = current_epoch.as_u64(),
             "FCR get_latest_confirmed: start"
@@ -722,57 +677,65 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
 
         // Safety check: if confirmed is missing/too-old/off-canonical, revert to finalized but
         // DO NOT return early; continue with epoch-start uplift and advancement as per spec.
-        if let Some(confirmed_block) = proto_array.get_block(&confirmed_root) {
+        if let Some(confirmed_block) = proto_array.get_block(&current_confirmed_root) {
             let confirmed_block_epoch = confirmed_block.slot.epoch(E::slots_per_epoch());
 
-            let too_old = confirmed_block_epoch + 1 < current_epoch;
-            let off_canonical = !proto_array.is_descendant(confirmed_root, head_root);
-            if too_old || off_canonical {
-                let finalized = fc_store.finalized_checkpoint().root;
+            // A confirmed block from a prior epoch (epoch N-2 or older) is considered "too old"
+            // and is a potential safety violation.
+            let is_too_old = confirmed_block_epoch + 1 < current_epoch;
+            // A confirmed block that is no longer an ancestor of the current head indicates a
+            // reorg has occurred that moved the canonical chain away from the confirmed block.
+            let is_off_canonical_chain = !proto_array.is_descendant(current_confirmed_root, head_root);
+            if is_too_old || is_off_canonical_chain {
+                let finalized_root = fc_store.finalized_checkpoint().root;
                 warn!(
                     current_epoch = current_epoch.as_u64(),
-                    confirmed = %confirmed_root,
-                    finalized = %finalized,
+                    confirmed = %current_confirmed_root,
+                    finalized = %finalized_root,
                     head = %head_root,
                     "FCR: falling back to finalized checkpoint for safety"
                 );
-                if off_canonical {
-                    // Confirmed block is off the canonical chain → confirmed reorg event
+                if is_off_canonical_chain {
+                    // This is a confirmed reorg event, a serious safety failure where a block
+                    // previously marked as confirmed has been reorganized out of the canonical chain.
                     inc_counter(&FCR_CONFIRMED_REORG_COUNT);
                     crate::metrics::inc_counter_vec(&FCR_RESTARTS_TOTAL, &["reorg"]);
                     if let (Some(old_b), Some(new_b)) = (
-                        proto_array.get_block(&confirmed_root),
-                        proto_array.get_block(&finalized),
+                        proto_array.get_block(&current_confirmed_root),
+                        proto_array.get_block(&finalized_root),
                     ) {
                         let old_slot = old_b.slot.as_u64();
                         let new_slot = new_b.slot.as_u64();
                         let slot_delta = old_slot.saturating_sub(new_slot) as f64;
                         observe(&FCR_CONFIRMED_REORG_SLOTS, slot_delta);
                         warn!(
-                            old_confirmed = %confirmed_root,
+                            old_confirmed = %current_confirmed_root,
                             old_slot,
-                            new_confirmed = %finalized,
+                            new_confirmed = %finalized_root,
                             new_slot,
                             slot_delta,
                             "FCR: confirmed root reorged off canonical chain"
                         );
                     }
                 } else {
-                    // Too old but still on canonical → treat as stale restart
+                    // If the block is too old but still canonical, it's considered a "stale"
+                    // state that requires a safe reset, but not a critical reorg failure.
                     crate::metrics::inc_counter_vec(&FCR_RESTARTS_TOTAL, &["stale"]);
                 }
-                confirmed_root = finalized;
+                current_confirmed_root = finalized_root;
             }
         } else {
-            let finalized = fc_store.finalized_checkpoint().root;
+            // If the confirmed root is not even present in proto_array, it's a critical error
+            // or a pruning issue.  We fall back to the finalized root for safety.
+            let finalized_root = fc_store.finalized_checkpoint().root;
             warn!(
-                confirmed_missing = %confirmed_root,
-                finalized = %finalized,
+                confirmed_missing = %current_confirmed_root,
+                finalized = %finalized_root,
                 "FCR: confirmed root missing, using finalized"
             );
-            // Missing confirmed root → stale restart
+            // Missing confirmed root implies a stale state, requiring a safe restart.
             crate::metrics::inc_counter_vec(&FCR_RESTARTS_TOTAL, &["stale"]);
-            confirmed_root = finalized;
+            current_confirmed_root = finalized_root;
         }
 
         // At the start of an epoch, if the prev-slot unrealized justified checkpoint
@@ -780,9 +743,10 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         // promote confirmed to that checkpoint (spec-aligned safety uplift),
         // then continue to attempt further advancement below.
         if fc_store.get_current_slot() % E::slots_per_epoch() == 0 {
-            // Use the prev-slot unrealized justified checkpoint per spec
-            let prev_uj = self.fcr_store.prev_slot_unrealized_justified_checkpoint;
-            let prev_uj_epoch = prev_uj.epoch;
+            // Per the spec, at an epoch boundary, we check the previous slot's unrealized
+            // justified checkpoint for a potential uplift to the confirmed root.
+            let prev_unrealized_justified_checkpoint = self.fcr_store.prev_slot_unrealized_justified_checkpoint;
+            let prev_uj_epoch = prev_unrealized_justified_checkpoint.epoch;
             info!(
                 current_slot = fc_store.get_current_slot().as_u64(),
                 prev_uj_epoch = prev_uj_epoch.as_u64(),
@@ -790,20 +754,23 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 epoch_boundary = true,
                 "FCR: checking epoch-start uplift conditions"
             );
+            // This uplift only applies if the checkpoint is from the immediately preceding epoch.
             if prev_uj_epoch + 1 == current_epoch {
                 if let (Some(confirmed_block), Some(prev_uj_block)) = (
-                    proto_array.get_block(&confirmed_root),
-                    proto_array.get_block(&prev_uj.root),
+                    proto_array.get_block(&current_confirmed_root),
+                    proto_array.get_block(&prev_unrealized_justified_checkpoint.root),
                 ) {
+                    // If the unrealized justified block is more recent than the current confirmed
+                    // block, we can safely "uplift" our confirmed root to this block.
                     if confirmed_block.slot < prev_uj_block.slot {
                         info!(
-                            prev_uj_root = %prev_uj.root,
+                            prev_uj_root = %prev_unrealized_justified_checkpoint.root,
                             prev_uj_slot = prev_uj_block.slot.as_u64(),
-                            uplift_from = %confirmed_root,
+                            uplift_from = %current_confirmed_root,
                             uplift_from_slot = confirmed_block.slot.as_u64(),
                             "FCR: epoch-start uplift to prev-slot unrealized justified checkpoint"
                         );
-                        confirmed_root = prev_uj.root;
+                        current_confirmed_root = prev_unrealized_justified_checkpoint.root;
                     } else {
                         info!(
                             prev_uj_slot = prev_uj_block.slot.as_u64(),
@@ -829,32 +796,33 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
 
         // Try to advance the confirmed root along the canonical chain
         if let Some(new_confirmed) =
-            self.find_latest_confirmed_descendant(confirmed_root, proto_array, fc_store, head_root)
+            self.find_latest_confirmed_descendant(current_confirmed_root, proto_array, fc_store, head_root)
         {
-            if new_confirmed != confirmed_root {
+            if new_confirmed != current_confirmed_root {
                 info!(
-                    old = %confirmed_root,
+                    old = %current_confirmed_root,
                     new = %new_confirmed,
                     head = %head_root,
                     "FCR: advanced latest confirmed descendant"
                 );
             }
-            confirmed_root = new_confirmed;
+            current_confirmed_root = new_confirmed;
         }
 
         let final_confirmed_slot = proto_array
-            .get_block(&confirmed_root)
+            .get_block(&current_confirmed_root)
             .map(|b| b.slot.as_u64())
             .unwrap_or_default();
         info!(
-            confirmed = %confirmed_root,
+            confirmed = %current_confirmed_root,
             confirmed_slot = final_confirmed_slot,
             head = %head_root,
             head_slot = head_slot,
             "FCR get_latest_confirmed: result"
         );
 
-        // Rollback detection: confirmed root moved to an earlier slot
+        // A "rollback" occurs if the new confirmed root is at an earlier slot than the previous
+        // one. This is a potential warning sign, indicating a reversion in the confirmed chain.
         if final_confirmed_slot > 0 && confirmed_slot_initial > 0 && final_confirmed_slot < confirmed_slot_initial {
             let slot_delta = (confirmed_slot_initial - final_confirmed_slot) as f64;
             inc_counter(&FCR_CONFIRMED_ROOT_ROLLBACK_COUNT);
@@ -864,12 +832,12 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 new_confirmed_slot = final_confirmed_slot,
                 slot_delta,
                 previous_confirmed = %self.fcr_store.confirmed_root,
-                new_confirmed = %confirmed_root,
+                new_confirmed = %current_confirmed_root,
                 "FCR: confirmed root rollback detected"
             );
         }
 
-        Some(confirmed_root)
+        Some(current_confirmed_root)
     }
 
     /// Updates FCR state after finding a new head - O(1) optimized.
@@ -881,15 +849,6 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     ///
     /// This method is called after fork choice determines a new head, allowing FCR
     /// to perform confirmation checks and update its internal state efficiently.
-    ///
-    /// # Arguments
-    /// * `head_root` - The newly determined head block root
-    /// * `proto_array` - The proto array containing the block DAG
-    /// * `fc_store` - The fork choice store containing current state
-    ///
-    /// # Returns
-    /// * `Ok(())` - Successfully updated FCR state
-    /// * `Err(Error)` - Error occurred during state update
     pub fn update_after_find_head<T>(
         &mut self,
         head_root: Hash256,
@@ -903,42 +862,41 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         if let Some(block) = proto_array.get_block(&head_root) {
             self.track_block_creation(head_root, block.slot);
         }
-        // **SYNC SAFETY**: Completely disable FCR during sync to prevent stack overflow
-        // COMMENTED OUT FOR TESTING: Enable FCR during sync
+        // **SYNC SAFETY**: Completely disable FCR during sync
         // Only run FCR when at current slot
-        // let current_slot = fc_store.get_current_slot();
-        // let head_slot = proto_array
-        //     .get_block(&head_root)
-        //     .map(|b| b.slot)
-        //     .unwrap_or(current_slot);
+        let current_slot = fc_store.get_current_slot();
+        let head_slot = proto_array
+            .get_block(&head_root)
+            .map(|b| b.slot)
+            .unwrap_or(current_slot);
         
         // Only run FCR when head_slot == current_slot
         // This prevents FCR from running during initial sync or when node is behind
-        // if head_slot != current_slot {
-        //     debug!(
-        //         head = %head_root,
-        //         head_slot = head_slot.as_u64(),
-        //         current_slot = current_slot.as_u64(),
-        //         "FCR: completely disabled during sync (head_slot != current_slot)"
-        //     );
-        //     return Ok(());
-        // }
+        if head_slot != current_slot {
+            debug!(
+                head = %head_root,
+                head_slot = head_slot.as_u64(),
+                current_slot = current_slot.as_u64(),
+                "FCR: completely disabled during sync (head_slot != current_slot)"
+            );
+            return Ok(());
+        }
 
         // O(1) optimization: Check if we already have a cached safe head
         // and if the new head is a descendant of the current safe head
-        // COMMENTED OUT FOR TESTING: This optimization prevents FCR from running
+        // This optimization prevents FCR from running
         // confirmation checks on new blocks. We need to ensure FCR actually checks
         // for new confirmations even when the new head is a descendant of the current safe head.
-        // if !self.fcr_store.safe_head_root.is_zero() 
-        //     && self.is_ancestor(proto_array, head_root, self.fcr_store.safe_head_root) {
-        //     // Safe head is still valid - O(1) lookup, no scanning needed
-        //     debug!(
-        //         head = %head_root,
-        //         safe_head = %self.fcr_store.safe_head_root,
-        //         "FCR: safe head still valid (O(1))"
-        //     );
-        //     return Ok(());
-        // }
+        if !self.fcr_store.safe_head_root.is_zero() 
+            && self.is_ancestor(proto_array, head_root, self.fcr_store.safe_head_root) {
+            // Safe head is still valid - O(1) lookup, no scanning needed
+            debug!(
+                head = %head_root,
+                safe_head = %self.fcr_store.safe_head_root,
+                "FCR: safe head still valid (O(1))"
+            );
+            return Ok(());
+        }
 
         // O(depth) scan only when necessary: no cached safe head or head changed
         let mut current_root = head_root;
@@ -1049,16 +1007,6 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     /// `find_latest_confirmed_descendant`. If the weighting checkpoint state is
     /// unavailable, we conservatively fall back to using `justified_balances` to
     /// estimate W.
-    ///
-    /// # Arguments
-    /// * `block_root` - The block root to check for confirmation
-    /// * `proto_array` - The proto array containing the block DAG
-    /// * `fc_store` - The fork choice store containing current state
-    ///
-    /// # Returns
-    /// * `Ok(true)` - Block meets confirmation criteria
-    /// * `Ok(false)` - Block does not meet confirmation criteria
-    /// * `Err(Error)` - Error occurred during check
     fn is_one_confirmed<T>(
         &self,
         block_root: Hash256,
@@ -1133,11 +1081,15 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             }
         };
 
-        // Get LMD-GHOST support weight (S) from proto array WITHOUT proposer boost.
-        // Pass the weighting checkpoint state to align with the spec signature. The
-        // ProtoArray implementation will currently ignore it, but this preserves API
-        // compatibility and allows future refinement without changing FCR.
-        let Some(support) = proto_array.get_weight::<E>(
+        // Retrieve the LMD‐GHOST *support weight* (denoted *S* in the Python spec) **excluding**
+        // any proposer boost.  This represents the total validator balance that has
+        // (directly or transitively) attested to `block_root`.
+        //
+        // NOTE: We pass the optional `weighting_checkpoint_state` to maintain API compatibility
+        // with the ProtoArray variant that accepts checkpoint context, even though the current
+        // implementation ignores it.  This future-proofs the call once ProtoArray integrates
+        // checkpoint aware weighting.
+        let Some(support_weight) = proto_array.get_weight::<E>(
             &block_root,
             weighting_checkpoint_state_opt.as_deref(),
             false, // support must EXCLUDE proposer boost
@@ -1150,8 +1102,10 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             )));
         };
 
-        // Compute committee weight (W) using the weighting checkpoint state if present,
-        // otherwise fall back to the existing fc_store-based calculation.
+        // Derive the maximum possible *committee weight* (denoted *W* in the spec).  This is the
+        // total stake that could have voted for slots in the inclusive range `(parent_block.slot+1 .. current_slot-1)`.
+        // Depending on data availability we either compute it precisely using the weighting
+        // checkpoint or fall back to a conservative estimate.
         let start_slot = parent_block.slot + 1;
         let end_slot = fc_store.get_current_slot() - 1;
 
@@ -1249,33 +1203,26 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             fc_store.proposer_boost_root(),
             fc_store.chain_spec(),
         );
-        let proposer_delta = match boosted_support_opt {
-            Some(boosted) if boosted > support => boosted.saturating_sub(support),
+        let proposer_score_delta = match boosted_support_opt {
+            Some(boosted) if boosted > support_weight => boosted.saturating_sub(support_weight),
             _ => proto_array
                 .get_proposer_score::<E>(block_root, fc_store.chain_spec())
                 .unwrap_or_default(),
         };
 
-        // Calculate the Byzantine threshold
-        let beta_threshold = self.config.beta_percentage;
-
-        // Apply the FCR formula: 2 * S > W + W // 50 * CONFIRMATION_BYZANTINE_THRESHOLD + proposer_score
-        // **Python Specification**: 2 * support > maximum_support + maximum_support // 50 * CONFIRMATION_BYZANTINE_THRESHOLD + proposer_score
-        // Using integer arithmetic to avoid floating point issues
-        let left_side = 2 * support;
-        let right_side = committee_weight + committee_weight / 50 * beta_threshold + proposer_delta;
-
         // Check LMD-GHOST confirmation (Q-indicator)
-        let lmd_confirmed = left_side > right_side;
+        let lmd_confirmed = self.check_lmd_ghost_confirmation_inequality(
+            support_weight,
+            committee_weight,
+            proposer_score_delta,
+        );
 
         debug!(
             block = %block_root,
-            support = support,
+            support = support_weight,
             committee_weight = committee_weight,
-            proposer_score = proposer_delta,
-            beta = beta_threshold,
-            left = left_side,
-            right = right_side,
+            proposer_score = proposer_score_delta,
+            beta = self.config.beta_percentage,
             passed = lmd_confirmed,
             "FCR Q-indicator: LMD-GHOST check"
         );
@@ -1287,10 +1234,10 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 block = %block_root,
                 slot = slot_u64,
                 epoch = epoch_u64,
-                support = support,
+                support = support_weight,
                 committee_weight = committee_weight,
-                proposer_score = proposer_delta,
-                beta = beta_threshold,
+                proposer_score = proposer_score_delta,
+                beta = self.config.beta_percentage,
                 "FCR: block meets LMD confirmation threshold"
             );
         }
@@ -1301,7 +1248,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         
         // Record validator support percentage if confirmed
         if lmd_confirmed && committee_weight > 0 {
-            let support_percentage = (support as f64 / committee_weight as f64) * 100.0;
+            let support_percentage = (support_weight as f64 / committee_weight as f64) * 100.0;
             observe(&FCR_VALIDATOR_SUPPORT_PERCENTAGE, support_percentage);
         }
 
@@ -1311,9 +1258,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
 
     /// Marks a block and all its descendants as confirmed.
     ///
-    /// **Specification**: Custom Lighthouse implementation
-    ///
-    /// **Why Required**: Lighthouse's side-table approach for FCR metadata requires explicit
+    /// Lighthouse's side-table approach for FCR metadata requires explicit
     /// confirmation inheritance management. Unlike the Python spec where confirmation status
     /// is computed on-demand, Lighthouse caches confirmation status in `FcrMeta` to avoid
     /// repeated expensive computations. This method ensures that when a parent is confirmed,
@@ -1321,12 +1266,6 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     ///
     /// This implements confirmation inheritance where if a parent block is confirmed,
     /// all its descendants are also confirmed.
-    ///
-    /// # Arguments
-    /// * `block_root` - The block root to mark as confirmed
-    /// * `proto_array` - The proto array containing the block DAG
-    /// * `current_slot` - The current slot when confirmation occurs
-    /// * `head_slot` - The current head's slot (for head-to-confirmed gap metric)
     fn mark_confirmed(&mut self, block_root: Hash256, proto_array: &ProtoArrayForkChoice, current_slot: Slot, head_slot: Slot) {
         // Mark the specific block as confirmed
         if let Some(meta) = self.meta.get_mut(&block_root) {
@@ -1426,16 +1365,6 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     ///
     /// This implements the Python specification's `find_latest_confirmed_descendant`
     /// function to advance confirmation along the canonical chain with epoch boundary handling.
-    ///
-    /// # Arguments
-    /// * `confirmed_root` - The current confirmed root
-    /// * `proto_array` - The proto array containing the block DAG
-    /// * `fc_store` - The fork choice store containing current state
-    /// * `head_root` - The current head block root
-    ///
-    /// # Returns
-    /// * `Some(Hash256)` - The latest confirmed descendant
-    /// * `None` - No advancement possible
     fn find_latest_confirmed_descendant<T>(
         &self,
         confirmed_root: Hash256,
@@ -1447,17 +1376,17 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         T: ForkChoiceStore<E>,
     {
         let current_epoch = fc_store.get_current_slot().epoch(E::slots_per_epoch());
-        let mut confirmed_root = confirmed_root;
+        let mut current_confirmed_root = confirmed_root;
         let head_slot = proto_array
             .get_block(&head_root)
             .map(|b| b.slot.as_u64())
             .unwrap_or_default();
         let confirmed_slot = proto_array
-            .get_block(&confirmed_root)
+            .get_block(&current_confirmed_root)
             .map(|b| b.slot.as_u64())
             .unwrap_or_default();
         debug!(
-            start_confirmed = %confirmed_root,
+            start_confirmed = %current_confirmed_root,
             start_confirmed_slot = confirmed_slot,
             head = %head_root,
             head_slot = head_slot,
@@ -1466,15 +1395,19 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         );
 
         // Get the confirmed block to check its epoch
-        let Some(confirmed_block) = proto_array.get_block(&confirmed_root) else {
+        let Some(confirmed_block) = proto_array.get_block(&current_confirmed_root) else {
             return None;
         };
 
         let confirmed_block_epoch = confirmed_block.slot.epoch(E::slots_per_epoch());
 
-        // First condition: Previous epoch advancement
+        // First condition: Previous epoch advancement.
+        // This logic allows advancing the confirmed root for blocks within the previous epoch.
+        // It's a critical step for ensuring liveness when the chain is just shy of an epoch boundary.
         if confirmed_block_epoch + 1 == current_epoch {
-            // voting source condition using prev_slot_head per spec
+            // The `voting_source` check ensures that a supermajority of validators are using recent
+            // enough information. This prevents a small group of validators from confirming a block
+            // that the rest of the network might not agree on.
             let voting_source_epoch = {
                 // Compute the epoch of the voting source that most validators used for prev_slot_head
                 use std::collections::HashMap;
@@ -1510,16 +1443,21 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 max_epoch
             };
 
-            let voting_source_ok = voting_source_epoch + 2 >= current_epoch;
+            let is_voting_source_ok = voting_source_epoch + 2 >= current_epoch;
 
-            // boundary OR (no_conflict AND (uj_prev OR uj_head))
-            let boundary = fc_store.get_current_slot() % E::slots_per_epoch() == 0;
-            let no_conflict = self
+            // FFG-based safety checks. These ensure that advancing confirmation won't conflict with
+            // future FFG finalization.
+            // `boundary`: True if we are exactly at an epoch boundary.
+            // `no_conflict`: True if no conflicting checkpoint can be justified.
+            // `uj_prev`/`uj_head`: True if the unrealized justified checkpoints of the previous head
+            // or current head are recent enough.
+            let is_at_epoch_boundary = fc_store.get_current_slot() % E::slots_per_epoch() == 0;
+            let no_conflicting_checkpoint = self
                 .will_no_conflicting_checkpoint_be_justified(proto_array, fc_store, head_root)
                 .unwrap_or(false);
 
             // read unrealized justification epoch for prev_slot_head and head
-            let uj_prev = proto_array
+            let is_unrealized_justified_prev_ok = proto_array
                 .get_block(&self.fcr_store.prev_slot_head)
                 .and_then(|b| {
                     b.unrealized_justified_checkpoint
@@ -1528,7 +1466,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 })
                 .map(|e| e + 1 >= current_epoch)
                 .unwrap_or(false);
-            let uj_head = proto_array
+            let is_unrealized_justified_head_ok = proto_array
                 .get_block(&head_root)
                 .and_then(|b| {
                     b.unrealized_justified_checkpoint
@@ -1551,30 +1489,31 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                     .and_then(|b| b.unrealized_justified_checkpoint.as_ref().map(|cp| cp.epoch))
                     .map(|e| e.as_u64())
                     .unwrap_or_default(),
-                uj_prev = uj_prev,
-                uj_head = uj_head,
+                uj_prev = is_unrealized_justified_prev_ok,
+                uj_head = is_unrealized_justified_head_ok,
                 "FCR: unrealized justification epoch analysis"
             );
 
             // Gate diagnostics for previous-epoch advancement
             debug!(
-                confirmed = %confirmed_root,
+                confirmed = %current_confirmed_root,
                 head = %head_root,
                 voting_source_epoch = voting_source_epoch.as_u64(),
                 current_epoch = current_epoch.as_u64(),
-                voting_source_ok = voting_source_ok,
-                boundary = boundary,
-                no_conflict = no_conflict,
-                uj_prev = uj_prev,
-                uj_head = uj_head,
+                voting_source_ok = is_voting_source_ok,
+                boundary = is_at_epoch_boundary,
+                no_conflict = no_conflicting_checkpoint,
+                uj_prev = is_unrealized_justified_prev_ok,
+                uj_head = is_unrealized_justified_head_ok,
                 "FCR prev-epoch advancement gate"
             );
 
-            if voting_source_ok && (boundary || (no_conflict && (uj_prev || uj_head))) {
-                // advancement through canonical chain for previous-epoch blocks
-                let mut current_confirmed = confirmed_root;
+            if is_voting_source_ok && (is_at_epoch_boundary || (no_conflicting_checkpoint && (is_unrealized_justified_prev_ok || is_unrealized_justified_head_ok))) {
+                // If the gates pass, we can attempt to advance confirmation.
+                // Iterate through the canonical chain from the current confirmed block towards the head.
+                let mut advanced_confirmed_root = current_confirmed_root;
                 if let Some(canonical_roots) =
-                    self.get_canonical_roots(proto_array, confirmed_root, head_root)
+                    self.get_canonical_roots(proto_array, current_confirmed_root, head_root)
                 {
                     for &block_root in canonical_roots.iter().skip(1) {
                         let block = match proto_array.get_block(&block_root) {
@@ -1582,33 +1521,38 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                             None => break,
                         };
                         let block_epoch = block.slot.epoch(E::slots_per_epoch());
+                        // Stop if we cross into the current epoch.
                         if block_epoch == current_epoch {
                             break;
                         }
+                        // The block must be a descendant of the previous slot's head.
                         if !proto_array.is_descendant(self.fcr_store.prev_slot_head, block_root) {
                             break;
                         }
-                        let ok = self
+                        // Check if the block itself is confirmed.
+                        let is_confirmed = self
                             .is_one_confirmed(block_root, proto_array, fc_store)
                             .ok()?;
                         debug!(
                             block = %block_root,
                             slot = block.slot.as_u64(),
-                            passed = ok,
+                            passed = is_confirmed,
                             "FCR prev-epoch advance step"
                         );
-                        if ok {
-                            current_confirmed = block_root;
+                        if is_confirmed {
+                            advanced_confirmed_root = block_root;
                         } else {
+                            // Stop advancing as soon as a block is not confirmed.
                             break;
                         }
                     }
-                    confirmed_root = current_confirmed;
+                    current_confirmed_root = advanced_confirmed_root;
                 }
             }
         }
 
         // Second condition: Current epoch advancement
+        // This logic allows advancing the confirmed root for blocks within the current epoch.
         if fc_store.get_current_slot() % E::slots_per_epoch() == 0 || {
             let current_epoch = fc_store.get_current_slot().epoch(E::slots_per_epoch());
             let cond_prev = proto_array
@@ -1632,9 +1576,9 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             cond_prev || cond_head
         } {
             // current-epoch advancement
-            let mut tentative_confirmed = confirmed_root;
+            let mut tentative_confirmed = current_confirmed_root;
             if let Some(canonical_roots) =
-                self.get_canonical_roots(proto_array, confirmed_root, head_root)
+                self.get_canonical_roots(proto_array, current_confirmed_root, head_root)
             {
                 for &block_root in canonical_roots.iter().skip(1) {
                     let block = match proto_array.get_block(&block_root) {
@@ -1648,7 +1592,8 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                         .unwrap_or(block_epoch);
 
                     if block_epoch > tentative_epoch {
-                        // crossing into current epoch: ensure checkpoint will be justified
+                        // Crossing into the current epoch from a previous one requires an FFG safety check.
+                        // We must ensure that the checkpoint for this new epoch *will* be justified.
                         if let Some(checkpoint_root) =
                             self.get_checkpoint_block(proto_array, block_root, block_epoch)
                         {
@@ -1673,16 +1618,16 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                         }
                     }
 
-                    let ok = self
+                    let is_confirmed = self
                         .is_one_confirmed(block_root, proto_array, fc_store)
                         .ok()?;
                     debug!(
                         block = %block_root,
                         slot = block.slot.as_u64(),
-                        passed = ok,
+                        passed = is_confirmed,
                         "FCR current-epoch advance step"
                     );
-                    if ok {
+                    if is_confirmed {
                         tentative_confirmed = block_root;
                     } else {
                         break;
@@ -1690,14 +1635,16 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 }
             }
 
-            // Final safety check for current epoch confirmation per spec
+            // Final safety check for current epoch confirmation per spec. This ensures that
+            // advancing confirmation within the current epoch doesn't violate FFG assumptions.
             let current_epoch = fc_store.get_current_slot().epoch(E::slots_per_epoch());
             let tentative_epoch = proto_array
                 .get_block(&tentative_confirmed)
                 .map(|b| b.slot.epoch(E::slots_per_epoch()))
                 .unwrap_or(current_epoch);
-            let safe = if tentative_epoch == current_epoch {
-                // voting source recency for tentative_confirmed
+            let is_safe_to_advance = if tentative_epoch == current_epoch {
+                // If the tentatively confirmed block is in the current epoch, we perform another
+                // `voting_source` recency check for this block.
                 use std::collections::HashMap;
                 let balances = &fc_store.justified_balances().effective_balances;
                 let mut epoch_to_weight: HashMap<Epoch, u128> = HashMap::new();
@@ -1733,6 +1680,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 );
                 ok
             } else if fc_store.get_current_slot() % E::slots_per_epoch() == 0 {
+                // If at an epoch boundary, we check for conflicting checkpoints.
                 let ok = self
                     .will_no_conflicting_checkpoint_be_justified(proto_array, fc_store, head_root)
                     .unwrap_or(false);
@@ -1748,26 +1696,26 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 false
             };
 
-            confirmed_root = if safe {
+            current_confirmed_root = if is_safe_to_advance {
                 tentative_confirmed
             } else {
-                confirmed_root
+                current_confirmed_root
             };
         }
 
         let final_slot = proto_array
-            .get_block(&confirmed_root)
+            .get_block(&current_confirmed_root)
             .map(|b| b.slot.as_u64())
             .unwrap_or_default();
         debug!(
-            confirmed = %confirmed_root,
+            confirmed = %current_confirmed_root,
             confirmed_slot = final_slot,
             head = %head_root,
             head_slot = head_slot,
             "FCR find_latest_confirmed_descendant: result"
         );
 
-        Some(confirmed_root)
+        Some(current_confirmed_root)
     }
 
     /// Gets canonical roots from ancestor to descendant.
@@ -1778,15 +1726,6 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     /// derives a suffix to the head, whereas here we explicitly return the path
     /// between `ancestor_root` and `descendant_root` (inclusive) along the
     /// canonical chain.
-    ///
-    /// # Arguments
-    /// * `proto_array` - The proto array containing the block DAG
-    /// * `ancestor_root` - The ancestor block root
-    /// * `descendant_root` - The descendant block root
-    ///
-    /// # Returns
-    /// * `Some(Vec<Hash256>)` - Canonical roots from ancestor to descendant
-    /// * `None` - No canonical path found
     fn get_canonical_roots(
         &self,
         proto_array: &ProtoArrayForkChoice,
@@ -1832,15 +1771,6 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     /// Gets the checkpoint block for a given epoch.
     ///
     /// **Python Specification**: `get_checkpoint_block(store, block_root, epoch)`
-    ///
-    /// # Arguments
-    /// * `proto_array` - The proto array containing the block DAG
-    /// * `block_root` - The block root
-    /// * `epoch` - The epoch
-    ///
-    /// # Returns
-    /// * `Some(Hash256)` - The checkpoint block root
-    /// * `None` - No checkpoint block found
     fn get_checkpoint_block(
         &self,
         proto_array: &ProtoArrayForkChoice,
@@ -1875,15 +1805,6 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     /// This function determines if a checkpoint will be justified based on current
     /// vote patterns and FFG analysis. It handles both current epoch and previous
     /// epoch checkpoints appropriately.
-    ///
-    /// # Arguments
-    /// * `proto_array` - The proto array containing the block DAG
-    /// * `fc_store` - The fork choice store containing current state
-    /// * `checkpoint` - The checkpoint to check justification for
-    ///
-    /// # Returns
-    /// * `Ok(bool)` - True if the checkpoint will be justified
-    /// * `Err(Error)` - Error occurred during analysis
     fn will_checkpoint_be_justified<T>(
         &self,
         proto_array: &ProtoArrayForkChoice,
@@ -1919,23 +1840,6 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         Ok(false)
     }
 
-    /// Gets the checkpoint weight for FFG analysis.
-    ///
-    /// **Python Specification**: `get_checkpoint_weight(store, checkpoint, checkpoint_state)`
-    ///
-    /// This function calculates the FFG support weight for a given checkpoint by analyzing
-    /// validator votes. It uses LMD-GHOST votes to estimate FFG support, as validators
-    /// voting for blocks descended from a checkpoint implicitly support that checkpoint.
-    ///
-    /// # Arguments
-    /// * `proto_array` - The proto array containing the block DAG
-    /// * `checkpoint` - The checkpoint to calculate weight for
-    /// * `fc_store` - The fork choice store containing current state
-    ///
-    /// # Returns
-    /// * `Ok(u64)` - The checkpoint weight in Gwei
-    /// * `Err(Error)` - Error occurred during calculation
-
     /// Gets the checkpoint weight for FFG analysis using a provided checkpoint state.
     ///
     /// **Python Specification**: `get_checkpoint_weight(store, checkpoint, checkpoint_state)`
@@ -1944,16 +1848,6 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     /// validator votes using a provided checkpoint state. It uses LMD-GHOST votes to estimate
     /// FFG support, as validators voting for blocks descended from a checkpoint implicitly
     /// support that checkpoint.
-    ///
-    /// # Arguments
-    /// * `proto_array` - The proto array containing the block DAG
-    /// * `checkpoint` - The checkpoint to calculate weight for
-    /// * `fc_store` - The fork choice store containing current state
-    /// * `checkpoint_state` - The checkpoint state to use for analysis
-    ///
-    /// # Returns
-    /// * `Ok(u64)` - The checkpoint weight in Gwei
-    /// * `Err(Error)` - Error occurred during calculation
     fn get_checkpoint_weight_with_state<T>(
         &self,
         proto_array: &ProtoArrayForkChoice,
@@ -2001,14 +1895,6 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     ///
     /// This function calculates the total FFG weight that could have been cast
     /// up to a specific slot within an epoch. It's used for FFG justification analysis.
-    ///
-    /// # Arguments
-    /// * `slot` - The slot to calculate weight up to
-    /// * `epoch` - The epoch containing the slot
-    /// * `total_active_balance` - The total active validator balance
-    ///
-    /// # Returns
-    /// * `u64` - The FFG weight up to the slot
     fn get_ffg_weight_till_slot(&self, slot: Slot, epoch: Epoch, total_active_balance: u64) -> u64 {
         let epoch_start_slot = epoch.start_slot(E::slots_per_epoch());
         let next_epoch_start = (epoch + 1).start_slot(E::slots_per_epoch());
@@ -2032,15 +1918,6 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     /// This function predicts whether a current epoch checkpoint will be justified
     /// based on current vote patterns and remaining honest weight. It implements
     /// the FFG justification analysis from the Python specification.
-    ///
-    /// # Arguments
-    /// * `proto_array` - The proto array containing the block DAG
-    /// * `fc_store` - The fork choice store containing current state
-    /// * `checkpoint` - The checkpoint to check justification for
-    ///
-    /// # Returns
-    /// * `Ok(bool)` - True if the checkpoint will be justified
-    /// * `Err(Error)` - Error occurred during analysis
     fn will_current_epoch_checkpoint_be_justified<T>(
         &self,
         proto_array: &ProtoArrayForkChoice,
@@ -2145,15 +2022,6 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     /// This function checks if any conflicting checkpoint could be justified,
     /// ensuring that advancing confirmation is safe at epoch boundaries.
     /// It's a safety check for FFG confirmation logic.
-    ///
-    /// # Arguments
-    /// * `proto_array` - The proto array containing the block DAG
-    /// * `fc_store` - The fork choice store containing current state
-    /// * `head_root` - The current head block root
-    ///
-    /// # Returns
-    /// * `Ok(bool)` - True if no conflicting checkpoint will be justified
-    /// * `Err(Error)` - Error occurred during analysis
     fn will_no_conflicting_checkpoint_be_justified<T>(
         &self,
         proto_array: &ProtoArrayForkChoice,
@@ -2266,14 +2134,6 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     ///
     /// This method removes FCR metadata for blocks that have been pruned from the proto array,
     /// ensuring that the FCR side-table stays aligned with the main DAG structure.
-    ///
-    /// # Arguments
-    /// * `finalized_root` - The finalized block root (blocks before this are pruned)
-    /// * `proto_array` - The proto array containing the block DAG
-    ///
-    /// # Returns
-    /// * `Ok(())` - Successfully pruned FCR metadata
-    /// * `Err(Error)` - Error occurred during pruning
     pub fn prune<T>(
         &mut self,
         finalized_root: Hash256,
@@ -2308,8 +2168,6 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             }
         });
 
-
-
         let after = self.meta.len();
         
         // Update metadata cache size metric
@@ -2331,15 +2189,6 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     ///
     /// This implements the committee weight calculation with cross-epoch boundary handling
     /// and safety adjustments as specified in the Python implementation.
-    ///
-    /// # Arguments
-    /// * `start_slot` - Starting slot for committee weight calculation
-    /// * `end_slot` - Ending slot for committee weight calculation
-    /// * `fc_store` - The fork choice store containing current state
-    ///
-    /// # Returns
-    /// * `Ok(u64)` - Committee weight between the slots
-    /// * `Err(Error)` - Error occurred during calculation
     fn get_committee_weight_between_slots<T>(
         &self,
         start_slot: Slot,
@@ -2436,12 +2285,6 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     ///
     /// **Specification**: Multiplies the estimate by `(1000 + COMMITTEE_WEIGHT_ESTIMATION_ADJUSTMENT_FACTOR) / 1000`
     /// to add a small safety margin (0.5% for the default factor of 5).
-    ///
-    /// # Arguments
-    /// * `estimate` - The raw committee weight estimate
-    ///
-    /// # Returns
-    /// * `u64` - The adjusted estimate with safety margin
     fn adjust_committee_weight_estimate_to_ensure_safety(&self, estimate: u64) -> u64 {
         // Apply safety adjustment: estimate * (1000 + adjustment_factor) / 1000
         // This adds a small safety margin to ensure FCR safety guarantees
@@ -2461,13 +2304,6 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     ///
     /// Returns whether the range from `start_slot` to `end_slot` (inclusive of both)
     /// includes an entire epoch.
-    ///
-    /// # Arguments
-    /// * `start_slot` - Starting slot
-    /// * `end_slot` - Ending slot
-    ///
-    /// # Returns
-    /// * `bool` - True if a full epoch is covered
     fn is_full_validator_set_covered(&self, start_slot: Slot, end_slot: Slot) -> bool {
         let start_epoch = start_slot.epoch(E::slots_per_epoch());
         let end_epoch = end_slot.epoch(E::slots_per_epoch());
@@ -2482,15 +2318,6 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     ///
     /// This implements the cross-epoch boundary calculation with pro-rata adjustments
     /// as specified in the Python implementation.
-    ///
-    /// # Arguments
-    /// * `start_slot` - Starting slot
-    /// * `end_slot` - Ending slot
-    /// * `total_active_balance` - Total active validator balance
-    ///
-    /// # Returns
-    /// * `Ok(u64)` - Estimated committee weight
-    /// * `Err(Error)` - Error occurred during calculation
     fn calculate_cross_epoch_weight_estimate(
         &self,
         start_slot: Slot,
@@ -2638,8 +2465,6 @@ pub mod bench_api {
         };
         bench_is_one_confirmed_math(support, w, proposer_score, beta_percentage)
     }
-
-    // Additional benchmark functions for comprehensive testing
 
     /// Benchmark wrapper: FCR update after find head (fork choice integration)
     pub fn bench_update_fcr_after_find_head() {
