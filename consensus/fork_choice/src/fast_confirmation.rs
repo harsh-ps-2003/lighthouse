@@ -7,20 +7,19 @@
 //! The FCR operates under network synchrony assumptions and uses LMD-GHOST vote weights
 //! combined with FFG checkpoint support to determine block permanence.
 //!
+use crate::metrics::{
+    inc_counter, observe, set_gauge, FCR_BYZANTINE_THRESHOLD_PERCENTAGE,
+    FCR_COMMITTEE_WEIGHT_CALCULATION_TIME, FCR_CONFIRMATION_SLOT_DELAY,
+    FCR_CONFIRMATION_TIME_SECONDS, FCR_CONFIRMED_REORG_COUNT, FCR_CONFIRMED_REORG_SLOTS,
+    FCR_CONFIRMED_ROOT_ROLLBACK_COUNT, FCR_CONFIRMED_ROOT_ROLLBACK_SLOTS,
+    FCR_EPOCH_BOUNDARY_TRANSITIONS, FCR_FFG_SUPPORT_CALCULATION_TIME,
+    FCR_HEAD_TO_CONFIRMED_GAP_SLOTS, FCR_IN_SYNC, FCR_METADATA_CACHE_SIZE, FCR_RESTARTS_TOTAL,
+    FCR_SAFE_HEAD_REORG_COUNT, FCR_SAFE_HEAD_REORG_DEPTH, FCR_SAFE_HEAD_REORG_DISTANCE,
+    FCR_STATE_PROVIDER_ERROR_TOTAL, FCR_STATE_PROVIDER_GET_CHECKPOINT_STATE_SECONDS,
+    FCR_STATE_PROVIDER_MISS_TOTAL, FCR_TAIL_CASES_TOTAL, FCR_VALIDATOR_SUPPORT_PERCENTAGE,
+};
 use crate::Error::ProtoArrayStringError;
 use crate::ForkChoiceStore;
-use crate::metrics::{
-    set_gauge, inc_counter, observe,
-    FCR_SAFE_HEAD_REORG_COUNT, FCR_SAFE_HEAD_REORG_DISTANCE,
-    FCR_SAFE_HEAD_REORG_DEPTH, FCR_CONFIRMATION_TIME_SECONDS, FCR_VALIDATOR_SUPPORT_PERCENTAGE,
-    FCR_BYZANTINE_THRESHOLD_PERCENTAGE, FCR_COMMITTEE_WEIGHT_CALCULATION_TIME,
-    FCR_FFG_SUPPORT_CALCULATION_TIME, FCR_METADATA_CACHE_SIZE, FCR_EPOCH_BOUNDARY_TRANSITIONS,
-    FCR_CONFIRMED_REORG_COUNT, FCR_CONFIRMED_REORG_SLOTS, FCR_CONFIRMED_ROOT_ROLLBACK_COUNT,
-    FCR_CONFIRMED_ROOT_ROLLBACK_SLOTS, FCR_CONFIRMATION_SLOT_DELAY, FCR_HEAD_TO_CONFIRMED_GAP_SLOTS,
-    FCR_RESTARTS_TOTAL, FCR_TAIL_CASES_TOTAL, FCR_IN_SYNC,
-    FCR_STATE_PROVIDER_GET_CHECKPOINT_STATE_SECONDS, FCR_STATE_PROVIDER_MISS_TOTAL,
-    FCR_STATE_PROVIDER_ERROR_TOTAL,
-};
 
 use proto_array::ProtoArrayForkChoice;
 use std::collections::HashMap;
@@ -167,33 +166,33 @@ impl FastConfirmationConfig {
     }
 }
 
-    /// Metadata for a block's FCR status.
-    ///
-    /// **Why Side-Table Approach**: Unlike the Python spec where confirmation status is computed
-    /// on-demand, Lighthouse caches this metadata to avoid repeated expensive computations.
-    /// This is a performance optimization that trades memory for CPU cycles, which is beneficial
-    /// for the high-frequency confirmation checks required by FCR.
-    ///
-    /// This stores per-block FCR metadata that would be computed on-demand in the Python spec.
-    ///
-    #[derive(Debug, Clone, Default)]
-    pub struct FcrMeta {
-        /// LMD-GHOST support weight for this block
-        /// **Spec**: Computed in `is_one_confirmed()` as `support`
-        pub support: u64,
-        /// Total committee weight that could have attested
-        /// **Spec**: Computed in `is_one_confirmed()` as `maximum_support`
-        pub committee_weight: u64,
-        /// Whether this block is confirmed by FCR
-        /// **Spec**: Computed on-demand in various functions
-        pub confirmed: bool,
-        /// Slot when this block was first seen (for confirmation delay tracking)
-        /// **FCR Spec**: Used to calculate actual confirmation delay
-        pub block_creation_slot: Slot,
-        /// Slot when this block was confirmed (for confirmation delay tracking)
-        /// **FCR Spec**: Used to calculate actual confirmation delay
-        pub confirmation_slot: Option<Slot>,
-    }
+/// Metadata for a block's FCR status.
+///
+/// **Why Side-Table Approach**: Unlike the Python spec where confirmation status is computed
+/// on-demand, Lighthouse caches this metadata to avoid repeated expensive computations.
+/// This is a performance optimization that trades memory for CPU cycles, which is beneficial
+/// for the high-frequency confirmation checks required by FCR.
+///
+/// This stores per-block FCR metadata that would be computed on-demand in the Python spec.
+///
+#[derive(Debug, Clone, Default)]
+pub struct FcrMeta {
+    /// LMD-GHOST support weight for this block
+    /// **Spec**: Computed in `is_one_confirmed()` as `support`
+    pub support: u64,
+    /// Total committee weight that could have attested
+    /// **Spec**: Computed in `is_one_confirmed()` as `maximum_support`
+    pub committee_weight: u64,
+    /// Whether this block is confirmed by FCR
+    /// **Spec**: Computed on-demand in various functions
+    pub confirmed: bool,
+    /// Slot when this block was first seen (for confirmation delay tracking)
+    /// **FCR Spec**: Used to calculate actual confirmation delay
+    pub block_creation_slot: Slot,
+    /// Slot when this block was confirmed (for confirmation delay tracking)
+    /// **FCR Spec**: Used to calculate actual confirmation delay
+    pub confirmation_slot: Option<Slot>,
+}
 
 /// Store for FCR state across slots and blocks.
 ///
@@ -226,7 +225,10 @@ pub struct FcrStore {
     /// Previous slot's head block
     /// **Spec**: `store.prev_slot_head`
     pub prev_slot_head: Hash256,
-
+    /// Unrealized justified checkpoint captured at the last slot of the previous epoch.
+    /// This value remains constant throughout the current epoch and is the weighting checkpoint
+    /// used for all LMD-GHOST Q-indicator computations.
+    pub prev_epoch_unrealized_justified_checkpoint: Checkpoint,
 }
 
 impl Default for FcrStore {
@@ -237,6 +239,7 @@ impl Default for FcrStore {
             prev_slot_justified_checkpoint: Checkpoint::default(),
             prev_slot_unrealized_justified_checkpoint: Checkpoint::default(),
             prev_slot_head: Hash256::zero(),
+            prev_epoch_unrealized_justified_checkpoint: Checkpoint::default(),
         }
     }
 }
@@ -278,10 +281,13 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             slashing = config.slashing_percentage,
             "Fast Confirmation Rule enabled"
         );
-        
+
         // Set the Byzantine threshold metric
-        set_gauge(&FCR_BYZANTINE_THRESHOLD_PERCENTAGE, config.beta_percentage as i64);
-        
+        set_gauge(
+            &FCR_BYZANTINE_THRESHOLD_PERCENTAGE,
+            config.beta_percentage as i64,
+        );
+
         Self {
             config,
             meta: HashMap::new(),
@@ -373,7 +379,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             .get_block(&self.fcr_store.safe_head_root)
             .map(|b| b.slot.as_u64())
             .unwrap_or_default();
-            
+
         SafeHeadMetrics {
             safe_head_root: self.fcr_store.safe_head_root,
             safe_head_slot,
@@ -389,7 +395,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         if new_safe_head != self.fcr_store.safe_head_root {
             let old_safe_head = self.fcr_store.safe_head_root;
             self.fcr_store.safe_head_root = new_safe_head;
-            
+
             info!(
                 old_safe_head = %old_safe_head,
                 new_safe_head = %new_safe_head,
@@ -452,8 +458,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         // Using integer arithmetic to avoid floating point issues:
         // 2 * S > W + (W / 50 * β) + proposer_score
         let left_side = 2 * support_weight;
-        let right_side =
-            committee_weight + committee_weight / 50 * beta_threshold + proposer_score;
+        let right_side = committee_weight + committee_weight / 50 * beta_threshold + proposer_score;
 
         left_side > right_side
     }
@@ -524,6 +529,13 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         self.fcr_store.prev_slot_unrealized_justified_checkpoint =
             *fc_store.unrealized_justified_checkpoint();
 
+        // Capture prev-epoch unrealized justified checkpoint once at the beginning of each epoch.
+        // This value is then held constant for all LMD-GHOST Q-indicator computations during the epoch.
+        if fc_store.get_current_slot() % E::slots_per_epoch() == 0 {
+            self.fcr_store.prev_epoch_unrealized_justified_checkpoint =
+                *fc_store.unrealized_justified_checkpoint();
+        }
+
         // Store the previous slot's head block
         self.fcr_store.prev_slot_head = head_root;
 
@@ -552,12 +564,12 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         T: ForkChoiceStore<E>,
     {
         let current_slot = fc_store.get_current_slot();
-        
+
         // Check for epoch boundary transition
         if current_slot % E::slots_per_epoch() == 0 {
             inc_counter(&FCR_EPOCH_BOUNDARY_TRANSITIONS);
         }
-        
+
         // Get head_slot for logging purposes
         let head_slot = proto_array
             .get_block(&head_root)
@@ -644,7 +656,8 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             let is_too_old = confirmed_block_epoch + 1 < current_epoch;
             // A confirmed block that is no longer an ancestor of the current head indicates a
             // reorg has occurred that moved the canonical chain away from the confirmed block.
-            let is_off_canonical_chain = !proto_array.is_descendant(current_confirmed_root, head_root);
+            let is_off_canonical_chain =
+                !proto_array.is_descendant(current_confirmed_root, head_root);
             if is_too_old || is_off_canonical_chain {
                 let finalized_root = fc_store.finalized_checkpoint().root;
                 warn!(
@@ -704,7 +717,8 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         if fc_store.get_current_slot() % E::slots_per_epoch() == 0 {
             // Per the spec, at an epoch boundary, we check the previous slot's unrealized
             // justified checkpoint for a potential uplift to the confirmed root.
-            let prev_unrealized_justified_checkpoint = self.fcr_store.prev_slot_unrealized_justified_checkpoint;
+            let prev_unrealized_justified_checkpoint =
+                self.fcr_store.prev_slot_unrealized_justified_checkpoint;
             let prev_uj_epoch = prev_unrealized_justified_checkpoint.epoch;
             info!(
                 current_slot = fc_store.get_current_slot().as_u64(),
@@ -754,9 +768,12 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         }
 
         // Try to advance the confirmed root along the canonical chain
-        if let Some(new_confirmed) =
-            self.find_latest_confirmed_descendant(current_confirmed_root, proto_array, fc_store, head_root)
-        {
+        if let Some(new_confirmed) = self.find_latest_confirmed_descendant(
+            current_confirmed_root,
+            proto_array,
+            fc_store,
+            head_root,
+        ) {
             if new_confirmed != current_confirmed_root {
                 info!(
                     old = %current_confirmed_root,
@@ -782,7 +799,10 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
 
         // A "rollback" occurs if the new confirmed root is at an earlier slot than the previous
         // one. This is a potential warning sign, indicating a reversion in the confirmed chain.
-        if final_confirmed_slot > 0 && confirmed_slot_initial > 0 && final_confirmed_slot < confirmed_slot_initial {
+        if final_confirmed_slot > 0
+            && confirmed_slot_initial > 0
+            && final_confirmed_slot < confirmed_slot_initial
+        {
             let slot_delta = (confirmed_slot_initial - final_confirmed_slot) as f64;
             inc_counter(&FCR_CONFIRMED_ROOT_ROLLBACK_COUNT);
             observe(&FCR_CONFIRMED_ROOT_ROLLBACK_SLOTS, slot_delta);
@@ -824,8 +844,9 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
 
         // O(1) optimization: Check if we already have a cached safe head
         // and if the new head is a descendant of the current safe head
-        if !self.fcr_store.safe_head_root.is_zero() 
-            && self.is_ancestor(proto_array, head_root, self.fcr_store.safe_head_root) {
+        if !self.fcr_store.safe_head_root.is_zero()
+            && self.is_ancestor(proto_array, head_root, self.fcr_store.safe_head_root)
+        {
             // Safe head is still valid - O(1) lookup, no scanning needed
             debug!(
                 head = %head_root,
@@ -852,7 +873,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 // confirm, preventing 0-slot delay artifacts in metrics.
                 self.track_block_creation(current_root, b.slot);
             }
-            
+
             // Check if this block is already confirmed
             if let Some(meta) = self.meta.get(&current_root) {
                 if meta.confirmed {
@@ -902,8 +923,8 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             Some(root) => {
                 self.update_safe_head(root);
                 info!(
-                    head = %head_root, 
-                    confirmed_ancestor = %root, 
+                    head = %head_root,
+                    confirmed_ancestor = %root,
                     depth,
                     "FCR update_after_find_head: confirmed ancestor found"
                 );
@@ -911,8 +932,8 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             None => {
                 // No confirmed ancestor found, safe head remains unchanged
                 debug!(
-                    head = %head_root, 
-                    depth, 
+                    head = %head_root,
+                    depth,
                     "FCR update_after_find_head: no confirmed ancestor within depth"
                 );
             }
@@ -979,14 +1000,10 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             }
         };
 
-        // Use weighting checkpoint state for both S and W when available
-        // If current slot is at epoch boundary, use prev_slot_unrealized_justified_checkpoint,
-        // otherwise use prev_slot_justified_checkpoint.
-        let weighting_checkpoint = if fc_store.get_current_slot() % E::slots_per_epoch() == 0 {
-            self.fcr_store.prev_slot_unrealized_justified_checkpoint
-        } else {
-            self.fcr_store.prev_slot_justified_checkpoint
-        };
+        // Use the *prev-epoch unrealized justified checkpoint* captured at the
+        // epoch boundary for all LMD-GHOST Q-indicator checks during the epoch.
+        // This avoids mid-epoch drift in committee shuffling.
+        let weighting_checkpoint = self.fcr_store.prev_epoch_unrealized_justified_checkpoint;
         debug!(
             block = %block_root,
             block_slot = block.slot.as_u64(),
@@ -1005,14 +1022,20 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             .get_checkpoint_state(&weighting_checkpoint)
         {
             Ok(opt) => {
-                observe(&FCR_STATE_PROVIDER_GET_CHECKPOINT_STATE_SECONDS, sp_start.elapsed().as_secs_f64());
+                observe(
+                    &FCR_STATE_PROVIDER_GET_CHECKPOINT_STATE_SECONDS,
+                    sp_start.elapsed().as_secs_f64(),
+                );
                 if opt.is_none() {
                     inc_counter(&FCR_STATE_PROVIDER_MISS_TOTAL);
                 }
                 opt
             }
             Err(_) => {
-                observe(&FCR_STATE_PROVIDER_GET_CHECKPOINT_STATE_SECONDS, sp_start.elapsed().as_secs_f64());
+                observe(
+                    &FCR_STATE_PROVIDER_GET_CHECKPOINT_STATE_SECONDS,
+                    sp_start.elapsed().as_secs_f64(),
+                );
                 inc_counter(&FCR_STATE_PROVIDER_ERROR_TOTAL);
                 None
             }
@@ -1058,7 +1081,9 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             return Ok(false);
         }
 
-        let committee_weight = if let Some(weighting_state) = weighting_checkpoint_state_opt.as_deref() {
+        let committee_weight = if let Some(weighting_state) =
+            weighting_checkpoint_state_opt.as_deref()
+        {
             let total_active_balance = weighting_state
                 .get_total_active_balance()
                 .unwrap_or(fc_store.justified_balances().total_effective_balance);
@@ -1136,7 +1161,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         let boosted_support_opt = proto_array.get_weight::<E>(
             &block_root,
             weighting_checkpoint_state_opt.as_deref(),
-            true,  // include proposer boost
+            true, // include proposer boost
             fc_store.proposer_boost_root(),
             fc_store.chain_spec(),
         );
@@ -1181,8 +1206,11 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
 
         // Record algorithm execution time (for performance monitoring)
         let elapsed = start_time.elapsed();
-        observe(&FCR_COMMITTEE_WEIGHT_CALCULATION_TIME, elapsed.as_secs_f64());
-        
+        observe(
+            &FCR_COMMITTEE_WEIGHT_CALCULATION_TIME,
+            elapsed.as_secs_f64(),
+        );
+
         // Record validator support percentage if confirmed
         if lmd_confirmed && committee_weight > 0 {
             let support_percentage = (support_weight as f64 / committee_weight as f64) * 100.0;
@@ -1203,16 +1231,23 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     ///
     /// This implements confirmation inheritance where if a parent block is confirmed,
     /// all its descendants are also confirmed.
-    fn mark_confirmed(&mut self, block_root: Hash256, proto_array: &ProtoArrayForkChoice, current_slot: Slot, head_slot: Slot) {
+    fn mark_confirmed(
+        &mut self,
+        block_root: Hash256,
+        proto_array: &ProtoArrayForkChoice,
+        current_slot: Slot,
+        head_slot: Slot,
+    ) {
         // Mark the specific block as confirmed
         if let Some(meta) = self.meta.get_mut(&block_root) {
             meta.confirmed = true;
             meta.confirmation_slot = Some(current_slot);
-            
+
             // Calculate and record actual confirmation delay
-            let confirmation_delay_slots = current_slot.as_u64() - meta.block_creation_slot.as_u64();
+            let confirmation_delay_slots =
+                current_slot.as_u64() - meta.block_creation_slot.as_u64();
             let confirmation_delay_seconds = confirmation_delay_slots as f64 * 12.0; // 12 seconds per slot
-            
+
             // Only record non-zero-slot confirmations into the primary histogram,
             // to ensure graphs represent real 1–2 slot confirmations. Still count
             // all outcomes in dedicated counters below.
@@ -1220,7 +1255,10 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 observe(&FCR_CONFIRMATION_TIME_SECONDS, confirmation_delay_seconds);
             }
             // Always record the slot-delay distribution
-            observe(&FCR_CONFIRMATION_SLOT_DELAY, confirmation_delay_slots as f64);
+            observe(
+                &FCR_CONFIRMATION_SLOT_DELAY,
+                confirmation_delay_slots as f64,
+            );
             // Record head-to-confirmed gap
             if let Some(block) = proto_array.get_block(&block_root) {
                 let head_gap = head_slot.as_u64().saturating_sub(block.slot.as_u64()) as f64;
@@ -1230,17 +1268,42 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
             // Increment outcome counters (0/1/2/≥3 slots)
             inc_counter(&crate::metrics::FCR_CONFIRMATIONS_TOTAL);
             match confirmation_delay_slots {
-                0 => crate::metrics::inc_counter_vec(&crate::metrics::FCR_CONFIRMATIONS_BY_SLOTS, &["0"]),
-                1 => crate::metrics::inc_counter_vec(&crate::metrics::FCR_CONFIRMATIONS_BY_SLOTS, &["1"]),
-                2 => crate::metrics::inc_counter_vec(&crate::metrics::FCR_CONFIRMATIONS_BY_SLOTS, &["2"]),
-                _ => crate::metrics::inc_counter_vec(&crate::metrics::FCR_CONFIRMATIONS_BY_SLOTS, &["ge3"]),
+                0 => crate::metrics::inc_counter_vec(
+                    &crate::metrics::FCR_CONFIRMATIONS_BY_SLOTS,
+                    &["0"],
+                ),
+                1 => crate::metrics::inc_counter_vec(
+                    &crate::metrics::FCR_CONFIRMATIONS_BY_SLOTS,
+                    &["1"],
+                ),
+                2 => crate::metrics::inc_counter_vec(
+                    &crate::metrics::FCR_CONFIRMATIONS_BY_SLOTS,
+                    &["2"],
+                ),
+                _ => crate::metrics::inc_counter_vec(
+                    &crate::metrics::FCR_CONFIRMATIONS_BY_SLOTS,
+                    &["ge3"],
+                ),
             }
-            
+
             // Tail-case labeling for analysis (delay >= 2)
             if confirmation_delay_slots >= 2 {
-                let epoch_boundary = if current_slot % E::slots_per_epoch() == 0 { "true" } else { "false" };
-                let delay_bucket = if confirmation_delay_slots == 2 { "2" } else if confirmation_delay_slots == 3 { "3" } else { "ge4" };
-                crate::metrics::inc_counter_vec(&FCR_TAIL_CASES_TOTAL, &[epoch_boundary, delay_bucket]);
+                let epoch_boundary = if current_slot % E::slots_per_epoch() == 0 {
+                    "true"
+                } else {
+                    "false"
+                };
+                let delay_bucket = if confirmation_delay_slots == 2 {
+                    "2"
+                } else if confirmation_delay_slots == 3 {
+                    "3"
+                } else {
+                    "ge4"
+                };
+                crate::metrics::inc_counter_vec(
+                    &FCR_TAIL_CASES_TOTAL,
+                    &[epoch_boundary, delay_bucket],
+                );
             }
 
             info!(
@@ -1293,7 +1356,6 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         } else {
             debug!(block = %block_root, "FCR: block confirmed");
         }
-
     }
 
     /// Finds the latest confirmed descendant along the canonical chain.
@@ -1412,7 +1474,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 })
                 .map(|e| e + 1 >= current_epoch)
                 .unwrap_or(false);
-            
+
             debug!(
                 prev_slot_head = %self.fcr_store.prev_slot_head,
                 head = %head_root,
@@ -1445,7 +1507,11 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 "FCR prev-epoch advancement gate"
             );
 
-            if is_voting_source_ok && (is_at_epoch_boundary || (no_conflicting_checkpoint && (is_unrealized_justified_prev_ok || is_unrealized_justified_head_ok))) {
+            if is_voting_source_ok
+                && (is_at_epoch_boundary
+                    || (no_conflicting_checkpoint
+                        && (is_unrealized_justified_prev_ok || is_unrealized_justified_head_ok)))
+            {
                 // If the gates pass, we can attempt to advance confirmation.
                 // Iterate through the canonical chain from the current confirmed block towards the head.
                 let mut advanced_confirmed_root = current_confirmed_root;
@@ -1878,16 +1944,25 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         let sp_start = std::time::Instant::now();
         let checkpoint_state = match self.state_provider.get_checkpoint_state(checkpoint) {
             Ok(Some(state)) => {
-                observe(&FCR_STATE_PROVIDER_GET_CHECKPOINT_STATE_SECONDS, sp_start.elapsed().as_secs_f64());
+                observe(
+                    &FCR_STATE_PROVIDER_GET_CHECKPOINT_STATE_SECONDS,
+                    sp_start.elapsed().as_secs_f64(),
+                );
                 state
             }
             Ok(None) => {
-                observe(&FCR_STATE_PROVIDER_GET_CHECKPOINT_STATE_SECONDS, sp_start.elapsed().as_secs_f64());
+                observe(
+                    &FCR_STATE_PROVIDER_GET_CHECKPOINT_STATE_SECONDS,
+                    sp_start.elapsed().as_secs_f64(),
+                );
                 inc_counter(&FCR_STATE_PROVIDER_MISS_TOTAL);
                 return Ok(false);
             }
             Err(_) => {
-                observe(&FCR_STATE_PROVIDER_GET_CHECKPOINT_STATE_SECONDS, sp_start.elapsed().as_secs_f64());
+                observe(
+                    &FCR_STATE_PROVIDER_GET_CHECKPOINT_STATE_SECONDS,
+                    sp_start.elapsed().as_secs_f64(),
+                );
                 inc_counter(&FCR_STATE_PROVIDER_ERROR_TOTAL);
                 return Ok(false);
             }
@@ -1988,16 +2063,25 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         let sp_start = std::time::Instant::now();
         let checkpoint_state = match self.state_provider.get_checkpoint_state(&checkpoint) {
             Ok(Some(state)) => {
-                observe(&FCR_STATE_PROVIDER_GET_CHECKPOINT_STATE_SECONDS, sp_start.elapsed().as_secs_f64());
+                observe(
+                    &FCR_STATE_PROVIDER_GET_CHECKPOINT_STATE_SECONDS,
+                    sp_start.elapsed().as_secs_f64(),
+                );
                 state
             }
             Ok(None) => {
-                observe(&FCR_STATE_PROVIDER_GET_CHECKPOINT_STATE_SECONDS, sp_start.elapsed().as_secs_f64());
+                observe(
+                    &FCR_STATE_PROVIDER_GET_CHECKPOINT_STATE_SECONDS,
+                    sp_start.elapsed().as_secs_f64(),
+                );
                 inc_counter(&FCR_STATE_PROVIDER_MISS_TOTAL);
                 return Ok(false);
             }
             Err(_) => {
-                observe(&FCR_STATE_PROVIDER_GET_CHECKPOINT_STATE_SECONDS, sp_start.elapsed().as_secs_f64());
+                observe(
+                    &FCR_STATE_PROVIDER_GET_CHECKPOINT_STATE_SECONDS,
+                    sp_start.elapsed().as_secs_f64(),
+                );
                 inc_counter(&FCR_STATE_PROVIDER_ERROR_TOTAL);
                 return Ok(false);
             }
@@ -2106,10 +2190,10 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
         });
 
         let after = self.meta.len();
-        
+
         // Update metadata cache size metric
         set_gauge(&FCR_METADATA_CACHE_SIZE, after as i64);
-        
+
         info!(
             finalized = %finalized_root,
             pruned = (before as i64 - after as i64),
@@ -2206,7 +2290,10 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
                 "FCR W: cross-epoch estimate with safety adjustment"
             );
             let elapsed = start_time.elapsed();
-            observe(&FCR_COMMITTEE_WEIGHT_CALCULATION_TIME, elapsed.as_secs_f64());
+            observe(
+                &FCR_COMMITTEE_WEIGHT_CALCULATION_TIME,
+                elapsed.as_secs_f64(),
+            );
             Ok(adjusted)
         }
     }
@@ -2353,7 +2440,11 @@ pub mod bench_api {
     }
 
     /// Benchmark wrapper: ffg weight till slot.
-    pub fn bench_get_ffg_weight_till_slot(slot: Slot, epoch: Epoch, total_active_balance: u64) -> u64 {
+    pub fn bench_get_ffg_weight_till_slot(
+        slot: Slot,
+        epoch: Epoch,
+        total_active_balance: u64,
+    ) -> u64 {
         fcr().get_ffg_weight_till_slot(slot, epoch, total_active_balance)
     }
 
@@ -2388,9 +2479,7 @@ pub mod bench_api {
         beta_percentage: u64,
     ) -> bool {
         let fcr = fcr();
-        let w = if start_slot.epoch(E::slots_per_epoch())
-            == end_slot.epoch(E::slots_per_epoch())
-        {
+        let w = if start_slot.epoch(E::slots_per_epoch()) == end_slot.epoch(E::slots_per_epoch()) {
             let slots_covered = end_slot - start_slot + 1;
             let weight_per_slot = total_active_balance / E::slots_per_epoch();
             weight_per_slot * slots_covered.as_u64()
@@ -2471,7 +2560,8 @@ pub mod bench_api {
         // This tests cross-epoch performance
         let current_slot = Slot::new(31); // End of epoch
         let next_slot = Slot::new(32); // Start of next epoch
-        let _is_boundary = current_slot.epoch(E::slots_per_epoch()) != next_slot.epoch(E::slots_per_epoch());
+        let _is_boundary =
+            current_slot.epoch(E::slots_per_epoch()) != next_slot.epoch(E::slots_per_epoch());
     }
 
     /// Benchmark wrapper: reorg detection simulation

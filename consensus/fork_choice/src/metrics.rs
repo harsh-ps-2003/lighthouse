@@ -252,8 +252,7 @@ pub static FCR_IN_SYNC: LazyLock<Result<IntGauge>> = LazyLock::new(|| {
 pub static FCR_CONFIRMATION_TIME_SECONDS: LazyLock<Result<Histogram>> = LazyLock::new(|| {
     // Buckets tailored for FCR confirmation delay (seconds), covering 0–120s.
     let buckets = vec![
-        0.1, 0.25, 0.5, 1.0, 2.0, 4.0, 6.0, 8.0,
-        10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 22.0, 24.0,
+        0.1, 0.25, 0.5, 1.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 22.0, 24.0,
         30.0, 45.0, 60.0, 90.0, 120.0,
     ];
     try_create_histogram_with_buckets(
@@ -290,12 +289,13 @@ pub static FCR_BYZANTINE_THRESHOLD_PERCENTAGE: LazyLock<Result<IntGauge>> = Lazy
 ///
 /// This is a performance metric for the FCR algorithm itself. High latency in this calculation
 /// could indicate a performance issue in the FCR implementation.
-pub static FCR_COMMITTEE_WEIGHT_CALCULATION_TIME: LazyLock<Result<Histogram>> = LazyLock::new(|| {
-    try_create_histogram(
-        "fcr_committee_weight_calculation_seconds",
-        "Time taken for committee weight calculations",
-    )
-});
+pub static FCR_COMMITTEE_WEIGHT_CALCULATION_TIME: LazyLock<Result<Histogram>> =
+    LazyLock::new(|| {
+        try_create_histogram(
+            "fcr_committee_weight_calculation_seconds",
+            "Time taken for committee weight calculations",
+        )
+    });
 
 /// Histogram for the time taken for FFG support calculations.
 ///
@@ -430,12 +430,15 @@ pub fn scrape_for_metrics<T: ForkChoiceStore<E>, E: EthSpec, S: StateProvider<E>
                 // Set to 0 if no safe head
                 set_gauge(&FCR_SAFE_HEAD_SLOT_NUMBER, 0);
             }
-            
+
             // Update metadata cache size
             set_gauge(&FCR_METADATA_CACHE_SIZE, fcr.metadata_cache_size() as i64);
-            
+
             // Update Byzantine threshold (this should already be set during FCR creation)
-            set_gauge(&FCR_BYZANTINE_THRESHOLD_PERCENTAGE, fcr.beta_percentage() as i64);
+            set_gauge(
+                &FCR_BYZANTINE_THRESHOLD_PERCENTAGE,
+                fcr.beta_percentage() as i64,
+            );
         }
     } else {
         // FCR is disabled, set metrics to 0

@@ -1586,7 +1586,7 @@ where
     // FCR Integration Methods :
 
     /// Returns the fast confirmed head if FCR is enabled, otherwise None.
-    /// 
+    ///
     /// This method returns the latest confirmed block root, triggering new calculations
     /// if needed
     pub fn get_fast_confirmed_head(&self) -> Option<Hash256> {

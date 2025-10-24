@@ -6212,11 +6212,12 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
         // otherwise fall back to justified hash.
         let safe_block_hash = if self.config.fast_confirmation_enabled {
             let fc = self.canonical_head.fork_choice_read_lock();
-            fc.get_fast_confirmed_head().and_then(|confirmed_root| {
-                fc.get_block(&confirmed_root)
-                    .and_then(|b| b.execution_status.block_hash())
-            })
-            .unwrap_or(justified_hash)
+            fc.get_fast_confirmed_head()
+                .and_then(|confirmed_root| {
+                    fc.get_block(&confirmed_root)
+                        .and_then(|b| b.execution_status.block_hash())
+                })
+                .unwrap_or(justified_hash)
         } else {
             justified_hash
         };
