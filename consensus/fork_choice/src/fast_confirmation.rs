@@ -73,13 +73,6 @@ pub trait StateProvider<E: EthSpec> {
     ///
     /// This method should return the beacon state at the checkpoint's epoch boundary.
     /// The state is used for FFG weight calculations and validator analysis.
-    ///
-    /// # Arguments
-    /// * `checkpoint` - The checkpoint to get the state for
-    ///
-    /// # Returns
-    /// * `Ok(Option<Arc<BeaconState<E>>>)` - The checkpoint state if available
-    /// * `Err(Self::Error)` - Error occurred during state access
     fn get_checkpoint_state(
         &self,
         checkpoint: &Checkpoint,
@@ -89,22 +82,12 @@ pub trait StateProvider<E: EthSpec> {
     ///
     /// This method provides the total effective balance of all active validators
     /// at the specified epoch, which is needed for FFG weight calculations.
-    ///
-    /// # Arguments
-    /// * `epoch` - The epoch to get the total active balance for
-    ///
-    /// # Returns
-    /// * `Ok(u64)` - The total active balance in Gwei
-    /// * `Err(Self::Error)` - Error occurred during balance calculation
     fn get_total_active_balance_at_epoch(&self, epoch: Epoch) -> Result<u64, Self::Error>;
 
     /// Gets the chain specification.
     ///
     /// This method provides access to the chain specification which is needed
     /// for various FFG calculations and state transitions.
-    ///
-    /// # Returns
-    /// * `&ChainSpec` - The chain specification
     fn chain_spec(&self) -> &ChainSpec;
 }
 
@@ -121,26 +104,11 @@ pub struct FastConfirmationConfig {
 
 impl FastConfirmationConfig {
     /// Creates a new FCR configuration with the given Byzantine threshold.
-    ///
-    /// # Arguments
-    /// * `beta_percentage` - Byzantine threshold in percentage (0-49)
-    ///
-    /// # Returns
-    /// * `Ok(FcrConfig)` - Valid configuration
-    /// * `Err(String)` - Invalid threshold (≥50% makes confirmation impossible)
     pub fn new(beta_percentage: u64) -> Result<Self, String> {
         Self::new_with_slashing(beta_percentage, DEFAULT_FCR_SLASHING_THRESHOLD_PERCENTAGE)
     }
 
     /// Creates a new FCR configuration with the given Byzantine and slashing thresholds.
-    ///
-    /// # Arguments
-    /// * `beta_percentage` - Byzantine threshold in percentage (0-49)
-    /// * `slashing_percentage` - Slashing threshold in percentage (0-100)
-    ///
-    /// # Returns
-    /// * `Ok(FcrConfig)` - Valid configuration
-    /// * `Err(String)` - Invalid threshold (≥50% makes confirmation impossible)
     pub fn new_with_slashing(
         beta_percentage: u64,
         slashing_percentage: u64,
@@ -305,7 +273,6 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     /// Returns the current safe head root
     ///
     /// **Performance**: O(1) safe head access instead of O(depth) ancestor scan.
-    /// **Tree-States**: Leverages Lighthouse's structural sharing for efficient updates.
     /// **Spec Compliance**: Safe head is derived from confirmed_root following the spec.
     ///
     /// # Returns
@@ -820,11 +787,6 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     }
 
     /// Updates FCR state after finding a new head - O(1) optimized.
-    ///
-    /// **Performance**: O(1) safe head lookup with O(depth) scan only when necessary.
-    /// **Tree-States**: Leverages structural sharing for efficient updates.
-    /// **Spec Compliance**: Follows Python spec confirmation logic while optimizing performance.
-    /// **Sync Safety**: Uses simplified logic during sync to prevent stack overflow.
     ///
     /// This method is called after fork choice determines a new head, allowing FCR
     /// to perform confirmation checks and update its internal state efficiently.
@@ -2302,7 +2264,7 @@ impl<E: EthSpec, S: StateProvider<E>> FastConfirmation<E, S> {
     ///
     /// **Python Specification**: `adjust_committee_weight_estimate_to_ensure_safety(estimate)`
     ///
-    /// **Why Required**: Committee weight estimation can have small errors due to
+    /// Committee weight estimation can have small errors due to
     /// cross-epoch calculations and validator set changes. This function adds a
     /// small safety margin to ensure FCR safety guarantees are maintained even
     /// with estimation errors.
