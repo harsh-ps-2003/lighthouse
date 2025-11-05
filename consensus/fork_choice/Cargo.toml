@@ -15,11 +15,21 @@ state_processing = { workspace = true }
 tracing = { workspace = true }
 types = { workspace = true }
 lru = { workspace = true }
+zerocopy = "0.7.35"
 
 [dev-dependencies]
+proptest = "1"
 beacon_chain = { workspace = true }
 store = { workspace = true }
 tokio = { workspace = true }
+criterion = { workspace = true }
+types = { workspace = true }
 
 [features]
 default = []
+fcr_bench = []
+
+[[bench]]
+name = "fcr_benches"
+harness = false
+required-features = ["fcr_bench"]

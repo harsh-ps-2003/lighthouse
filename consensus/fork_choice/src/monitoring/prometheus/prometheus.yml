@@ -1,0 +1,16 @@
+# Prometheus config for FCR research with confirmation time tracking
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  - "fcr_rules.yml"
+
+scrape_configs:
+  - job_name: 'lighthouse-sepolia'
+    static_configs:
+      - targets: ['127.0.0.1:5054']  # Your Lighthouse metrics endpoint
+    scrape_interval: 5s
+    metrics_path: /metrics
+
+# FCR metrics are defined in fcr_rules.yml

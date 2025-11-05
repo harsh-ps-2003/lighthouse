@@ -257,3 +257,13 @@ impl DBError {
         Self { message }
     }
 }
+
+// Implement std::error::Error and Display so this type can satisfy foreign trait bounds.
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Keep simple: delegate to Debug representation.
+        write!(f, "{:?}", self)
+    }
+}
+
+impl std::error::Error for Error {}

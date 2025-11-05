@@ -1,5 +1,6 @@
 use crate::fast_confirmation::{
-    FastConfirmation, FastConfirmationConfig, DEFAULT_FCR_BYZANTINE_THRESHOLD_PERCENTAGE,
+    FastConfirmation, FastConfirmationConfig, StateProvider,
+    DEFAULT_FCR_BYZANTINE_THRESHOLD_PERCENTAGE,
 };
 use crate::metrics::{self, scrape_for_metrics};
 use crate::{ForkChoiceStore, InvalidationOperation};
@@ -272,6 +273,15 @@ fn dequeue_attestations(
         queued_attestations.len() as u64,
     );
 
+    // Track late attestations for FCR metrics
+    let late_attestations = queued_attestations.len();
+    if late_attestations > 0 {
+        metrics::inc_counter_by(
+            &metrics::FCR_LATE_ATTESTATION_COUNT,
+            late_attestations as u64,
+        );
+    }
+
     std::mem::replace(queued_attestations, remaining)
 }
 
@@ -312,10 +322,11 @@ pub struct ForkChoiceView {
 ///
 /// - Management of the justified state and caching of balances.
 /// - Queuing of attestations from the current slot.
-pub struct ForkChoice<T, E>
+pub struct ForkChoice<T, E, S>
 where
     T: ForkChoiceStore<E>,
     E: EthSpec,
+    S: StateProvider<E>,
 {
     /// Storage for `ForkChoice`, modelled off the spec `Store` object.
     fc_store: T,
@@ -327,15 +338,16 @@ where
     forkchoice_update_parameters: ForkchoiceUpdateParameters,
 
     /// Fast Confirmation Rule
-    fast_confirmation: Option<FastConfirmation<E>>,
+    fast_confirmation: Option<FastConfirmation<E, S>>,
 
     _phantom: PhantomData<E>,
 }
 
-impl<T, E> PartialEq for ForkChoice<T, E>
+impl<T, E, S> PartialEq for ForkChoice<T, E, S>
 where
     T: ForkChoiceStore<E> + PartialEq,
     E: EthSpec,
+    S: StateProvider<E>,
 {
     fn eq(&self, other: &Self) -> bool {
         self.fc_store == other.fc_store
@@ -344,10 +356,11 @@ where
     }
 }
 
-impl<T, E> ForkChoice<T, E>
+impl<T, E, S> ForkChoice<T, E, S>
 where
     T: ForkChoiceStore<E>,
     E: EthSpec,
+    S: StateProvider<E>,
 {
     /// Instantiates `Self` from an anchor (genesis or another finalized checkpoint).
     pub fn from_anchor(
@@ -358,6 +371,7 @@ where
         current_slot: Option<Slot>,
         fcr_enabled: bool,
         fcr_threshold: Option<u64>,
+        state_provider: S,
         spec: &ChainSpec,
     ) -> Result<Self, Error<T::Error>> {
         // Sanity check: the anchor must lie on an epoch boundary.
@@ -424,9 +438,10 @@ where
                 // If no custom threshold was supplied, fall back to the default configured value.
                 let threshold_pct =
                     fcr_threshold.unwrap_or(DEFAULT_FCR_BYZANTINE_THRESHOLD_PERCENTAGE);
-                Some(FastConfirmation::new(FastConfirmationConfig::new(
-                    threshold_pct,
-                )?))
+                Some(FastConfirmation::new(
+                    FastConfirmationConfig::new(threshold_pct)?,
+                    state_provider,
+                ))
             } else {
                 None
             },
@@ -501,6 +516,9 @@ where
         system_time_current_slot: Slot,
         spec: &ChainSpec,
     ) -> Result<Hash256, Error<T::Error>> {
+        // Capture previous store slot to detect a real slot transition for per-slot FCR updates
+        let prev_slot_before_update = self.fc_store.get_current_slot();
+
         // Provide the slot (as per the system clock) to the `fc_store` and then return its view of
         // the current slot. The `fc_store` will ensure that the `current_slot` is never
         // decreasing, a property which we must maintain.
@@ -539,6 +557,14 @@ where
 
         // Update FCR state after finding the head
         self.update_fcr_after_find_head(head_root)?;
+
+        // If we actually advanced into a new slot, roll FCR's per-slot state now that
+        // attestations from the previous slot have been applied and the head is known.
+        if current_slot > prev_slot_before_update {
+            if let Some(fcr) = &mut self.fast_confirmation {
+                fcr.on_new_slot(&self.proto_array, &self.fc_store, head_root)?;
+            }
+        }
 
         Ok(head_root)
     }
@@ -1250,8 +1276,13 @@ where
     }
 
     /// Returns the weight for the given block root.
+    ///
+    /// **Note**: This method uses `get_weight_legacy()` for backward compatibility.
+    /// The FCR-enhanced `get_weight()` method requires additional parameters for
+    /// checkpoint state and proposer boost control. This method maintains the
+    /// simple API that existing code expects.
     pub fn get_block_weight(&self, block_root: &Hash256) -> Option<u64> {
-        self.proto_array.get_weight(block_root)
+        self.proto_array.get_weight_legacy(block_root)
     }
 
     /// Returns the `ProtoBlock` for the justified checkpoint.
@@ -1286,6 +1317,35 @@ where
     pub fn is_descendant(&self, ancestor_root: Hash256, descendant_root: Hash256) -> bool {
         self.proto_array
             .is_descendant(ancestor_root, descendant_root)
+    }
+
+    /// Checks if a block is an ancestor of another block.
+    ///
+    /// **Python Specification**: `is_ancestor(store, root, ancestor)`
+    ///
+    /// **Why Required**: This function is used to ensure blocks are on the canonical chain
+    /// and for confirmation inheritance. It's a fundamental building block for FCR logic
+    /// that determines block relationships in the DAG.
+    ///
+    /// **Specification**: Returns true if `ancestor` is an ancestor of `root` in the block DAG.
+    /// A block is considered an ancestor of itself.
+    ///
+    /// # Arguments
+    /// * `root` - The descendant block root to check
+    /// * `ancestor` - The potential ancestor block root
+    ///
+    /// # Returns
+    /// * `bool` - True if `ancestor` is an ancestor of `root`, false otherwise
+    pub fn is_ancestor(&self, root: &Hash256, ancestor: &Hash256) -> bool {
+        // A block is an ancestor of itself
+        if root == ancestor {
+            return true;
+        }
+
+        // Use the existing is_descendant method with swapped arguments
+        // is_descendant(ancestor, root) checks if root is a descendant of ancestor
+        // which is equivalent to ancestor being an ancestor of root
+        self.is_descendant(*ancestor, *root)
     }
 
     /// Returns `Ok(true)` if `block_root` has been imported optimistically or deemed invalid.
@@ -1389,7 +1449,14 @@ where
 
         self.proto_array
             .maybe_prune(finalized_root)
-            .map_err(Into::into)
+            .map_err(|e| Error::from(e))?;
+
+        // Prune FCR side-tables in lock-step with ProtoArray pruning to avoid stale metadata
+        if let Some(fcr) = &mut self.fast_confirmation {
+            fcr.prune::<T>(finalized_root, &self.proto_array)?;
+        }
+
+        Ok(())
     }
 
     /// Instantiate `Self` from some `PersistedForkChoice` generated by a earlier call to
@@ -1445,6 +1512,7 @@ where
         // Add FCR parameters directly
         fcr_enabled: bool,
         fcr_threshold: Option<u64>,
+        state_provider: S,
         spec: &ChainSpec,
     ) -> Result<Self, Error<T::Error>> {
         let proto_array =
@@ -1468,9 +1536,10 @@ where
                 // If no custom threshold was supplied, fall back to the default configured value.
                 let threshold_pct =
                     fcr_threshold.unwrap_or(DEFAULT_FCR_BYZANTINE_THRESHOLD_PERCENTAGE);
-                Some(FastConfirmation::new(FastConfirmationConfig::new(
-                    threshold_pct,
-                )?))
+                Some(FastConfirmation::new(
+                    FastConfirmationConfig::new(threshold_pct)?,
+                    state_provider,
+                ))
             } else {
                 None
             },
@@ -1517,6 +1586,9 @@ where
     // FCR Integration Methods :
 
     /// Returns the fast confirmed head if FCR is enabled, otherwise None.
+    ///
+    /// This method returns the latest confirmed block root, triggering new calculations
+    /// if needed
     pub fn get_fast_confirmed_head(&self) -> Option<Hash256> {
         self.fast_confirmation.as_ref().and_then(|fcr| {
             fcr.get_latest_confirmed(
@@ -1530,6 +1602,11 @@ where
     /// Returns whether Fast Confirmation Rule is enabled
     pub fn is_fast_confirmation_enabled(&self) -> bool {
         self.fast_confirmation.is_some()
+    }
+
+    /// Returns a reference to the Fast Confirmation Rule if enabled
+    pub fn fast_confirmation(&self) -> Option<&FastConfirmation<E, S>> {
+        self.fast_confirmation.as_ref()
     }
 
     /// Updates FCR state after finding a new head.

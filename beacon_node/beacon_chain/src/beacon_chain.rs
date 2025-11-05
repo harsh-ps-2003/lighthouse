@@ -120,9 +120,10 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
 use store::iter::{BlockRootsIterator, ParentRootBlockIterator, StateRootsIterator};
+use store::HotColdDB;
 use store::{
-    BlobSidecarListFromRoot, DatabaseBlock, Error as DBError, HotColdDB, HotStateSummary,
-    KeyValueStoreOp, StoreItem, StoreOp,
+    BlobSidecarListFromRoot, DatabaseBlock, Error as DBError, HotStateSummary, KeyValueStoreOp,
+    StoreItem, StoreOp,
 };
 use task_executor::{ShutdownReason, TaskExecutor};
 use tokio_stream::Stream;
@@ -346,6 +347,8 @@ pub struct BeaconChainMetrics {
 
 pub type LightClientProducerEvent<T> = (Hash256, Slot, SyncAggregate<T>);
 
+use store::hot_cold_store::HotColdDBStateProvider;
+
 pub type BeaconForkChoice<T> = ForkChoice<
     BeaconForkChoiceStore<
         <T as BeaconChainTypes>::EthSpec,
@@ -353,6 +356,11 @@ pub type BeaconForkChoice<T> = ForkChoice<
         <T as BeaconChainTypes>::ColdStore,
     >,
     <T as BeaconChainTypes>::EthSpec,
+    HotColdDBStateProvider<
+        <T as BeaconChainTypes>::EthSpec,
+        <T as BeaconChainTypes>::HotStore,
+        <T as BeaconChainTypes>::ColdStore,
+    >,
 >;
 
 pub type BeaconStore<T> = Arc<
@@ -626,8 +634,10 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             return Ok(None);
         };
 
-        let fc_store =
-            BeaconForkChoiceStore::from_persisted(persisted_fork_choice.fork_choice_store, store)?;
+        let fc_store = BeaconForkChoiceStore::from_persisted(
+            persisted_fork_choice.fork_choice_store,
+            store.clone(),
+        )?;
 
         Ok(Some(ForkChoice::from_persisted(
             persisted_fork_choice.fork_choice,
@@ -636,6 +646,7 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
             // FCR parameters passed from caller
             fcr_enabled,
             fcr_threshold,
+            HotColdDBStateProvider(store.clone()),
             spec,
         )?))
     }
@@ -6197,10 +6208,24 @@ impl<T: BeaconChainTypes> BeaconChain<T> {
                 }
             };
 
+        // Choose safe_block_hash: prefer FCR-confirmed block's execution hash when available,
+        // otherwise fall back to justified hash.
+        let safe_block_hash = if self.config.fast_confirmation_enabled {
+            let fc = self.canonical_head.fork_choice_read_lock();
+            fc.get_fast_confirmed_head()
+                .and_then(|confirmed_root| {
+                    fc.get_block(&confirmed_root)
+                        .and_then(|b| b.execution_status.block_hash())
+                })
+                .unwrap_or(justified_hash)
+        } else {
+            justified_hash
+        };
+
         let forkchoice_updated_response = execution_layer
             .notify_forkchoice_updated(
                 head_hash,
-                justified_hash,
+                safe_block_hash,
                 finalized_hash,
                 current_slot,
                 head_block_root,

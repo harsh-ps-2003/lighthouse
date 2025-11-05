@@ -18,6 +18,7 @@ use crate::{
     parse_data_column_key, BlobSidecarListFromRoot, DBColumn, DatabaseBlock, Error, ItemStore,
     KeyValueStoreOp, StoreItem, StoreOp,
 };
+use fork_choice::fast_confirmation::StateProvider as FcrStateProvider;
 use itertools::{process_results, Itertools};
 use lru::LruCache;
 use parking_lot::{Mutex, RwLock};
@@ -3339,6 +3340,139 @@ impl<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>> HotColdDB<E, Hot, Cold> 
         self.compact_freezer()?;
 
         Ok(())
+    }
+}
+
+// Newtype wrapper to satisfy coherence rules (foreign trait for local type via local newtype).
+pub struct HotColdDBStateProvider<E: EthSpec, Hot: ItemStore<E>, Cold: ItemStore<E>>(
+    pub std::sync::Arc<HotColdDB<E, Hot, Cold>>,
+);
+
+impl<E, Hot, Cold> FcrStateProvider<E> for HotColdDBStateProvider<E, Hot, Cold>
+where
+    E: EthSpec,
+    Hot: ItemStore<E> + 'static,
+    Cold: ItemStore<E> + 'static,
+{
+    type Error = Error;
+
+    fn get_checkpoint_state(
+        &self,
+        checkpoint: &Checkpoint,
+    ) -> Result<Option<Arc<BeaconState<E>>>, Self::Error> {
+        let epoch_start_slot = checkpoint.epoch.start_slot(E::slots_per_epoch());
+
+        // 1) If the epoch boundary is finalized, use the split finalized state.
+        let split = self.0.get_split_info();
+        if split.slot == epoch_start_slot {
+            if let Some((_, state)) = self
+                .0
+                .get_advanced_hot_state_from_cache(split.block_root, split.slot)
+            {
+                return Ok(Some(Arc::new(state)));
+            }
+        }
+
+        // 2) If a cold snapshot exists exactly at the epoch start slot, load it directly.
+        if let Ok(Some(state_root)) = self.0.get_cold_state_root(epoch_start_slot) {
+            if let Some(state) = self
+                .0
+                .get_state(&state_root, Some(epoch_start_slot), true)?
+            {
+                return Ok(Some(Arc::new(state)));
+            }
+        }
+
+        // 3) Derive the canonical epoch-boundary block root on the canonical chain and obtain
+        //    the epoch-start state by replaying from the nearest boundary.
+        //    We locate the first block with slot == epoch_start_slot by scanning forward from
+        //    the previous snapshot boundary.
+        let start_scan_slot = epoch_start_slot.saturating_sub(Slot::new(1));
+        if let Ok(iter) =
+            self.0
+                .forwards_block_roots_iterator_until(start_scan_slot, epoch_start_slot, || {
+                    // Provide a hot state lazily on demand. If unavailable, error to fall through.
+                    let split_info = self.0.get_split_info();
+                    let (state, _) = self
+                        .0
+                        .load_hot_state(&split_info.state_root, true)?
+                        .ok_or(Error::MissingHotStateSummary(split_info.state_root))?;
+                    Ok((state, split_info.block_root))
+                })
+        {
+            if let Some(Ok((epoch_boundary_block_root, _))) = iter.find_or_last(|res| match res {
+                Ok((_, slot)) => *slot == epoch_start_slot,
+                Err(_) => true,
+            }) {
+                // We need a state_root hint. Prefer cold state root at epoch start if available.
+                let state_root_hint =
+                    if let Ok(Some(root)) = self.0.get_cold_state_root(epoch_start_slot) {
+                        Some(root)
+                    } else {
+                        None
+                    };
+
+                // Try to get an advanced hot state at the epoch start using the block root hint.
+                if let Some(state_root_hint) = state_root_hint {
+                    if let Ok(Some((_sr, state))) = self.0.get_advanced_hot_state(
+                        epoch_boundary_block_root,
+                        epoch_start_slot,
+                        state_root_hint,
+                    ) {
+                        return Ok(Some(Arc::new(state)));
+                    }
+                }
+
+                // Fallback: load a baseline hot state and replay to epoch start.
+                if let Some((_, base_state)) = self
+                    .0
+                    .get_advanced_hot_state_from_cache(split.block_root, split.slot)
+                {
+                    if let Ok(replayed) = self.0.load_hot_state_using_replay(
+                        base_state,
+                        epoch_start_slot,
+                        epoch_boundary_block_root,
+                        true,
+                    ) {
+                        return Ok(Some(Arc::new(replayed)));
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn get_total_active_balance_at_epoch(&self, epoch: Epoch) -> Result<u64, Self::Error> {
+        let slot = epoch.start_slot(E::slots_per_epoch());
+        // Prefer a state exactly at epoch boundary.
+        if let Ok(Some(state_root)) = self.0.get_cold_state_root(slot) {
+            if let Some(state) = self.0.get_state(&state_root, Some(slot), true)? {
+                return state
+                    .get_total_active_balance_at_epoch(epoch)
+                    .map_err(Into::into);
+            }
+        }
+
+        // Fallback to split (finalized) state if epoch == finalized epoch.
+        let split = self.0.get_split_info();
+        let finalized_epoch = split.slot.epoch(E::slots_per_epoch());
+        if epoch == finalized_epoch {
+            if let Some((_state_root, state)) = self
+                .0
+                .get_advanced_hot_state_from_cache(split.block_root, split.slot)
+            {
+                return state
+                    .get_total_active_balance_at_epoch(epoch)
+                    .map_err(Into::into);
+            }
+        }
+
+        Err(Error::MissingHotStateSummary(split.state_root))
+    }
+
+    fn chain_spec(&self) -> &ChainSpec {
+        self.0.spec.as_ref()
     }
 }
 
